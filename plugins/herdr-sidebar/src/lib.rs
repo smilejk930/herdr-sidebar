@@ -9,6 +9,7 @@ pub mod branch_ui;
 pub mod diffview;
 pub mod editor;
 pub mod ensure;
+pub mod excludes;
 pub mod fontsetup;
 pub mod git;
 pub mod gitdeco;

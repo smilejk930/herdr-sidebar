@@ -444,13 +444,15 @@ pub fn hits_collapse_button(column: u16, row: u16, pane_width: u16, pane_height:
     row == pane_height.saturating_sub(1) && column >= pane_width.saturating_sub(4)
 }
 
-/// Theme-matched activity-bar icons: (explorer, search, source control). FA
+/// Theme-matched activity-bar icons: explorer, search, source control, exclude. FA
 /// glyphs render two cells wide in the non-Mono Nerd Font — chips reserve
 /// the second cell (see the activity-bar renderer).
-pub fn activity_icons(theme: IconTheme) -> (&'static str, &'static str, &'static str) {
+pub fn activity_icons(
+    theme: IconTheme,
+) -> (&'static str, &'static str, &'static str, &'static str) {
     match theme {
-        IconTheme::Material => ("\u{f07b}", "\u{f002}", "\u{f126}"),
-        IconTheme::Emoji => ("📁", "🔍", "🔀"),
+        IconTheme::Material => ("\u{f07b}", "\u{f002}", "\u{f126}", "\u{f0b0}"),
+        IconTheme::Emoji => ("📁", "🔍", "🔀", "🚫"),
     }
 }
 

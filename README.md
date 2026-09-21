@@ -31,10 +31,10 @@ herdr plugin install alexarthurs/herdr-sidebar/plugins/herdr-sidebar
 Tagged releases use SHA-256-verified binaries on supported platforms and fall back to a
 source build when needed.
 
-## Three Views
+## Four Views
 
-The activity bar switches Explorer, Search, and Source Control instantly in one process.
-Use the mouse or press `1`, `2`, and `3`.
+The activity bar switches Explorer, Search, Source Control, and Exclude instantly in one process.
+Use the mouse or press `1`, `2`, `3`, and `4`.
 
 ### Explorer & Preview
 
@@ -71,6 +71,14 @@ Use the mouse or press `1`, `2`, and `3`.
 - Keep branch and sync controls visible in every sidebar view with the compact Git footer;
   hide it from Settings if you prefer the extra row.
 
+### Exclude
+
+- Manage VS Code-style glob patterns directly from activity `4`.
+- `Files exclude` only hides entries in Explorer; `Search exclude` applies to Quick Open and
+  project text search. Toggle **Search use Git ignore** to include Git-ignored source files.
+- Rules can be global or scoped to the current project. The **Web application preset** is an
+  editable example for `.next`, `build`, `node_modules`, `.git`, and Java class artifacts.
+
 ## Settings
 
 <div align="center">
@@ -103,7 +111,7 @@ folder stays put until that pane changes directory again.
 | `m` | context menu | `m` | context menu |
 | `s` | settings | `s` | settings |
 | `b` | hide | `b` | hide |
-| `1` / `2` / `3` | change view | `1` / `2` / `3` | change view |
+| `1` / `2` / `3` / `4` | change view | `1` / `2` / `3` / `4` | change view |
 
 Preview: drag to select, `Ctrl/Cmd+C` to copy, arrows/PageUp/PageDown to scroll,
 `w` to toggle wrapping, and `q` or Esc to close.

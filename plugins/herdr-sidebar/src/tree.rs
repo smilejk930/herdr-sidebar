@@ -6,6 +6,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
@@ -27,6 +29,7 @@ pub struct Tree {
     expanded: BTreeSet<PathBuf>,
     cache: HashMap<PathBuf, Vec<Entry>>,
     pub show_hidden: bool,
+    exclude: Option<GlobSet>,
 }
 
 impl Tree {
@@ -36,6 +39,7 @@ impl Tree {
             expanded: BTreeSet::new(),
             cache: HashMap::new(),
             show_hidden: true,
+            exclude: None,
         }
     }
 
@@ -56,6 +60,19 @@ impl Tree {
     /// Drop all cached listings; the next `rows()` re-reads the disk.
     pub fn refresh(&mut self) {
         self.cache.clear();
+    }
+
+    /// Replaces VS Code-style `files.exclude` glob patterns for this tree.
+    /// Invalid patterns are ignored here because the editor validates before
+    /// saving; keeping the tree usable is more useful than hiding everything.
+    pub fn set_excludes(&mut self, patterns: &[String]) {
+        let mut builder = GlobSetBuilder::new();
+        for pattern in patterns {
+            if let Ok(glob) = Glob::new(pattern) {
+                builder.add(glob);
+            }
+        }
+        self.exclude = builder.build().ok();
     }
 
     pub fn is_expanded(&self, path: &Path) -> bool {
@@ -131,6 +148,9 @@ impl Tree {
                 continue;
             }
             let path = dir.join(&entry.name);
+            if self.is_excluded(&path) {
+                continue;
+            }
             let expanded = entry.is_dir && self.is_expanded(&path);
             out.push(Row {
                 name: entry.name,
@@ -143,6 +163,18 @@ impl Tree {
                 self.walk(&path, depth + 1, out);
             }
         }
+    }
+
+    fn is_excluded(&self, path: &Path) -> bool {
+        let Some(exclude) = &self.exclude else {
+            return false;
+        };
+        let relative = path
+            .strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        exclude.is_match(relative)
     }
 }
 
@@ -252,6 +284,18 @@ mod tests {
             names(&tree.rows()),
             vec![("src".into(), 0), ("Cargo.toml".into(), 0)]
         );
+    }
+
+    #[test]
+    fn files_exclude_hides_matching_tree_entries_and_descendants() {
+        let tmp = TempDir::new("files-exclude");
+        tmp.mkdir("node_modules/pkg");
+        tmp.touch("node_modules/pkg/index.js");
+        tmp.touch("visible.rs");
+        let mut tree = Tree::new(tmp.0.clone());
+        tree.set_excludes(&["**/node_modules".into()]);
+
+        assert_eq!(names(&tree.rows()), vec![("visible.rs".into(), 0)]);
     }
 
     #[test]

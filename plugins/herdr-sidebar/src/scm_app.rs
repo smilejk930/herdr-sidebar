@@ -3401,7 +3401,7 @@ impl App {
         let outer_top = area.y;
         let outer_bottom = area.y + 2;
         let area = Rect::new(area.x, area.y + 1, area.width, 1);
-        let (exp_icon, search_icon, git_icon) = activity_icons(self.theme);
+        let (exp_icon, search_icon, git_icon, _) = activity_icons(self.theme);
         // Both FA glyphs (folder, code-fork) render two cells wide in the
         // non-Mono Nerd Font; reserve the second cell in each chip so the
         // highlights are equal-sized with centered icons.

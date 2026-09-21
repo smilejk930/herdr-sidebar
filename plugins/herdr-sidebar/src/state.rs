@@ -350,11 +350,11 @@ pub fn follow_cwd_setting_value(enabled: bool) -> String {
 /// they split (see [`spawn_env`]); when it didn't reach us, fall back to
 /// the conventional location herdr resolves it to.
 pub fn state_path() -> Option<PathBuf> {
-    Some(state_dir()?.join("state.json"))
+    Some(plugin_state_dir()?.join("state.json"))
 }
 
 fn editor_command_path() -> Option<PathBuf> {
-    Some(state_dir()?.join("editor-command.txt"))
+    Some(plugin_state_dir()?.join("editor-command.txt"))
 }
 
 pub fn load_editor_command() -> Option<String> {
@@ -382,7 +382,7 @@ pub fn save_editor_command(command: &str) -> bool {
     std::fs::write(path, command).is_ok()
 }
 
-fn state_dir() -> Option<PathBuf> {
+pub fn plugin_state_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("HERDR_PLUGIN_STATE_DIR")
         && !dir.is_empty()
     {
@@ -403,7 +403,7 @@ fn state_dir() -> Option<PathBuf> {
 /// every configured shell without quoting an absolute path.
 pub fn spawn_env() -> serde_json::Value {
     let mut env = serde_json::Map::new();
-    if let Some(dir) = state_dir() {
+    if let Some(dir) = plugin_state_dir() {
         env.insert(
             "HERDR_PLUGIN_STATE_DIR".into(),
             serde_json::Value::String(dir.display().to_string()),
@@ -550,7 +550,7 @@ pub struct TreeState {
 }
 
 fn tree_path() -> Option<PathBuf> {
-    Some(state_dir()?.join("tree.json"))
+    Some(plugin_state_dir()?.join("tree.json"))
 }
 
 /// The whole file: tree state per workspace ROOT. One file serves every
@@ -665,7 +665,7 @@ pub struct ScmState {
 }
 
 fn scm_path() -> Option<PathBuf> {
-    Some(state_dir()?.join("scm.json"))
+    Some(plugin_state_dir()?.join("scm.json"))
 }
 
 /// Stable JSON key for a filesystem path. Git commonly reports `/` on
@@ -806,7 +806,7 @@ fn merge_scm_drafts(stored: &mut std::collections::BTreeMap<String, String>, sta
 type RootsFile = serde_json::Map<String, serde_json::Value>;
 
 fn roots_path() -> Option<PathBuf> {
-    Some(state_dir()?.join("roots.json"))
+    Some(plugin_state_dir()?.join("roots.json"))
 }
 
 /// Forgiving decode: anything missing or garbled yields an empty map, so a

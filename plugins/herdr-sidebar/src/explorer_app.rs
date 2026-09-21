@@ -19,6 +19,7 @@ use unicode_width::UnicodeWidthChar;
 
 use herdr_sidebar::actions::{self, MenuAction, MenuEntry};
 use herdr_sidebar::branch_ui::{BranchPicker, FooterZones, PickerAction, draw_git_footer};
+use herdr_sidebar::excludes::{self, EffectiveRules, Scope as ExcludeScope};
 use herdr_sidebar::git::{Git, Status};
 use herdr_sidebar::gitdeco::{Decorations, RepoStatus};
 use herdr_sidebar::icons::{IconTheme, icon};
@@ -169,6 +170,26 @@ enum PromptKind {
     /// current root, or ~-prefixed).
     ChangeFolder,
     CustomEditor,
+    ExcludePattern {
+        scope: ExcludeScope,
+        category: ExcludeCategory,
+        index: Option<usize>,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExcludeCategory {
+    Files,
+    Search,
+}
+
+impl ExcludeCategory {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Files => "Files",
+            Self::Search => "Search",
+        }
+    }
 }
 
 /// A modal layered over the tree: the context menu, a name prompt, or a
@@ -198,6 +219,13 @@ enum Overlay {
     /// The ⚙ settings modal: mouse-toggleable panel settings.
     Settings {
         selected: usize,
+        rect: Rect,
+        scroll: usize,
+    },
+    /// Fourth activity: VS Code-style file/search exclusion management.
+    Excludes {
+        selected: usize,
+        scope: ExcludeScope,
         rect: Rect,
         scroll: usize,
     },
@@ -254,6 +282,7 @@ struct QuickFile {
 struct QuickIndex {
     root: PathBuf,
     show_hidden: bool,
+    rules: EffectiveRules,
     files: std::sync::Arc<Vec<QuickFile>>,
     truncated: bool,
 }
@@ -270,6 +299,7 @@ struct ContentHit {
 struct ContentSearchResult {
     root: PathBuf,
     show_hidden: bool,
+    rules: EffectiveRules,
     query: String,
     include: String,
     exclude: String,
@@ -305,6 +335,15 @@ enum Setting {
 /// don't toggle.
 type SettingRow = (Setting, &'static str, String, bool);
 
+#[derive(Clone, Copy)]
+enum ExcludeRow {
+    Scope,
+    GitIgnore,
+    Add(ExcludeCategory),
+    Pattern(ExcludeCategory, usize),
+    Preset,
+}
+
 pub struct App {
     tree: Tree,
     rows: Vec<Row>,
@@ -338,6 +377,7 @@ pub struct App {
     notice: Option<String>,
     // Merged-sidebar state.
     sidebar_state: sidebar::State,
+    exclude_rules: EffectiveRules,
     other_exe: Option<std::path::PathBuf>,
     activity: ActivityZones,
     /// The ⚙ button's rect from the last draw (activity bar in unified mode,
@@ -408,6 +448,7 @@ struct ActivityZones {
     explorer: (u16, u16),
     search: (u16, u16),
     source_control: (u16, u16),
+    excludes: (u16, u16),
 }
 
 impl Default for ActivityZones {
@@ -418,6 +459,7 @@ impl Default for ActivityZones {
             explorer: (0, 0),
             search: (0, 0),
             source_control: (0, 0),
+            excludes: (0, 0),
         }
     }
 }
@@ -442,6 +484,8 @@ impl App {
         cwd_follower: std::rc::Rc<std::cell::RefCell<herdr_sidebar::launch::CwdFollower>>,
     ) -> Self {
         let mut tree = Tree::new(root);
+        let exclude_rules = excludes::effective(&tree.root_path());
+        tree.set_excludes(&exclude_rules.files);
         // Mirror the tree the user was already looking at. Idle ticks keep
         // same-root sidebars synchronized after startup too.
         let saved = sidebar::load_tree_state(&tree.root_path());
@@ -486,6 +530,7 @@ impl App {
             suspended_search: None,
             notice: None,
             sidebar_state,
+            exclude_rules,
             other_exe,
             activity: ActivityZones::default(),
             gear: Rect::default(),
@@ -531,6 +576,7 @@ impl App {
     /// on their own. Self-throttling, so the event loop may call it freely.
     pub fn tick(&mut self) {
         self.sync_shared_settings();
+        self.sync_excludes();
         self.sync_shared_tree();
         self.collect_quick_index();
         self.collect_content_search();
@@ -578,6 +624,17 @@ impl App {
             self.deco = Decorations::empty();
         }
         self.request_decorations(true);
+    }
+
+    fn sync_excludes(&mut self) {
+        let rules = excludes::effective(&self.tree.root_path());
+        if rules == self.exclude_rules {
+            return;
+        }
+        self.exclude_rules = rules;
+        self.tree.set_excludes(&self.exclude_rules.files);
+        self.invalidate_quick_index();
+        self.rebuild();
     }
 
     fn sync_shared_tree(&mut self) {
@@ -1054,10 +1111,11 @@ impl App {
             KeyCode::F(9) => Some('1'),
             KeyCode::F(10) => Some('2'),
             KeyCode::F(11) => Some('3'),
+            KeyCode::F(12) => Some('4'),
             _ => None,
         };
         if let Some(c) = injected_view.or(match key.code {
-            KeyCode::Char(c @ ('1' | '2' | '3')) => Some(c),
+            KeyCode::Char(c @ ('1' | '2' | '3' | '4')) => Some(c),
             _ => None,
         }) {
             let ctrl = injected_view.is_some()
@@ -1087,7 +1145,11 @@ impl App {
                         self.open_content_search(false);
                         None
                     }
-                    _ => self.switch_to(View::SourceControl),
+                    '3' => self.switch_to(View::SourceControl),
+                    _ => {
+                        self.open_excludes();
+                        None
+                    }
                 };
             }
         }
@@ -1133,6 +1195,7 @@ impl App {
             KeyCode::Char('1') => return self.switch_to(View::Explorer),
             KeyCode::Char('2') => self.open_content_search(false),
             KeyCode::Char('3') => return self.switch_to(View::SourceControl),
+            KeyCode::Char('4') => self.open_excludes(),
             _ => {}
         }
         None
@@ -1162,6 +1225,10 @@ impl App {
                 }
                 if hits_activity_button(zones.source_control, zones.row, mouse.column, mouse.row) {
                     return self.switch_to(View::SourceControl);
+                }
+                if hits_activity_button(zones.excludes, zones.row, mouse.column, mouse.row) {
+                    self.open_excludes();
+                    return None;
                 }
             }
             let gear = self.gear;
@@ -1372,12 +1439,22 @@ impl App {
             StartContentSearch,
             OpenContent(PathBuf, usize),
             ToggleSetting(usize),
+            ExcludeActivate,
+            ExcludeDelete,
             AdjustWidth(bool),
             DeleteConfirmed(PathBuf, bool),
             Picker(PickerAction),
         }
         let settings = self.settings_rows();
         let row_count = settings.len();
+        let exclude_row_count = self
+            .overlay
+            .as_ref()
+            .and_then(|overlay| match overlay {
+                Overlay::Excludes { scope, .. } => Some(self.exclude_rows(*scope).len()),
+                _ => None,
+            })
+            .unwrap_or(0);
         let cmd = match self.overlay.as_mut() {
             Some(Overlay::Settings { selected, .. }) => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('s') => Cmd::Close,
@@ -1400,6 +1477,27 @@ impl App {
                     Cmd::AdjustWidth(true)
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => Cmd::ToggleSetting(*selected),
+                _ => Cmd::Nothing,
+            },
+            Some(Overlay::Excludes {
+                selected, scope, ..
+            }) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('4') => Cmd::Close,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected = selected.saturating_sub(1);
+                    Cmd::Nothing
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *selected = (*selected + 1).min(exclude_row_count.saturating_sub(1));
+                    Cmd::Nothing
+                }
+                KeyCode::Tab => {
+                    *scope = scope.other();
+                    *selected = 0;
+                    Cmd::Nothing
+                }
+                KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('a') => Cmd::ExcludeActivate,
+                KeyCode::Char('d') | KeyCode::Delete => Cmd::ExcludeDelete,
                 _ => Cmd::Nothing,
             },
             Some(Overlay::BranchPicker(picker)) => Cmd::Picker(picker.key(key)),
@@ -1707,6 +1805,8 @@ impl App {
                 }
             }
             Cmd::Activate => self.activate_menu_entry(),
+            Cmd::ExcludeActivate => self.activate_exclude_row(),
+            Cmd::ExcludeDelete => self.delete_exclude_row(),
             Cmd::ConfirmPrompt => self.confirm_prompt(),
             Cmd::OpenQuick(path) => {
                 self.overlay = None;
@@ -1932,6 +2032,166 @@ impl App {
         });
     }
 
+    fn open_excludes(&mut self) {
+        self.suspend_search_for_modal();
+        self.overlay = Some(Overlay::Excludes {
+            selected: 0,
+            scope: ExcludeScope::Project,
+            rect: Rect::default(),
+            scroll: 0,
+        });
+    }
+
+    fn exclude_rows(&self, scope: ExcludeScope) -> Vec<(ExcludeRow, String)> {
+        let rules = excludes::scoped(&self.tree.root_path(), scope);
+        let mut rows = vec![
+            (
+                ExcludeRow::Scope,
+                format!("Scope: {} (tab to switch)", scope.label()),
+            ),
+            (
+                ExcludeRow::GitIgnore,
+                format!(
+                    "Search use Git ignore: {}",
+                    if rules
+                        .use_ignore_files
+                        .unwrap_or(self.exclude_rules.use_ignore_files)
+                    {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ),
+            ),
+            (
+                ExcludeRow::Add(ExcludeCategory::Files),
+                "Files exclude  + Add pattern".into(),
+            ),
+        ];
+        rows.extend(rules.files.iter().enumerate().map(|(index, pattern)| {
+            (
+                ExcludeRow::Pattern(ExcludeCategory::Files, index),
+                format!("  {pattern}"),
+            )
+        }));
+        rows.push((
+            ExcludeRow::Add(ExcludeCategory::Search),
+            "Search exclude + Add pattern".into(),
+        ));
+        rows.extend(rules.search.iter().enumerate().map(|(index, pattern)| {
+            (
+                ExcludeRow::Pattern(ExcludeCategory::Search, index),
+                format!("  {pattern}"),
+            )
+        }));
+        rows.push((ExcludeRow::Preset, "Apply Web application preset".into()));
+        rows
+    }
+
+    fn apply_excludes(&mut self, rules: EffectiveRules) {
+        self.exclude_rules = rules;
+        self.tree.set_excludes(&self.exclude_rules.files);
+        self.invalidate_quick_index();
+        self.rebuild();
+    }
+
+    fn activate_exclude_row(&mut self) {
+        let Some(Overlay::Excludes {
+            selected, scope, ..
+        }) = self.overlay.as_ref()
+        else {
+            return;
+        };
+        let selected = *selected;
+        let scope = *scope;
+        let Some((row, _)) = self.exclude_rows(scope).get(selected).cloned() else {
+            return;
+        };
+        match row {
+            ExcludeRow::Scope => {
+                if let Some(Overlay::Excludes {
+                    scope, selected, ..
+                }) = self.overlay.as_mut()
+                {
+                    *scope = scope.other();
+                    *selected = 0;
+                }
+            }
+            ExcludeRow::GitIgnore => {
+                let current = excludes::scoped(&self.tree.root_path(), scope)
+                    .use_ignore_files
+                    .unwrap_or(self.exclude_rules.use_ignore_files);
+                self.apply_excludes(excludes::update(&self.tree.root_path(), scope, |rules| {
+                    rules.use_ignore_files = Some(!current);
+                }));
+            }
+            ExcludeRow::Add(category) => {
+                self.overlay = Some(Overlay::Prompt {
+                    title: format!("{} exclude pattern", category.label()),
+                    input: String::new(),
+                    kind: PromptKind::ExcludePattern {
+                        scope,
+                        category,
+                        index: None,
+                    },
+                });
+            }
+            ExcludeRow::Pattern(category, index) => {
+                let rules = excludes::scoped(&self.tree.root_path(), scope);
+                let input = match category {
+                    ExcludeCategory::Files => rules.files.get(index),
+                    ExcludeCategory::Search => rules.search.get(index),
+                }
+                .cloned()
+                .unwrap_or_default();
+                self.overlay = Some(Overlay::Prompt {
+                    title: format!("Edit {} exclude", category.label()),
+                    input,
+                    kind: PromptKind::ExcludePattern {
+                        scope,
+                        category,
+                        index: Some(index),
+                    },
+                });
+            }
+            ExcludeRow::Preset => self.apply_excludes(excludes::apply_web_application_preset(
+                &self.tree.root_path(),
+            )),
+        }
+    }
+
+    fn delete_exclude_row(&mut self) {
+        let Some(Overlay::Excludes {
+            selected, scope, ..
+        }) = self.overlay.as_ref()
+        else {
+            return;
+        };
+        let selected = *selected;
+        let scope = *scope;
+        let Some((ExcludeRow::Pattern(category, index), _)) =
+            self.exclude_rows(scope).get(selected).cloned()
+        else {
+            return;
+        };
+        self.apply_excludes(excludes::update(&self.tree.root_path(), scope, |rules| {
+            let patterns = match category {
+                ExcludeCategory::Files => &mut rules.files,
+                ExcludeCategory::Search => &mut rules.search,
+            };
+            if index < patterns.len() {
+                patterns.remove(index);
+            }
+        }));
+        let row_count = self.exclude_rows(scope).len();
+        if let Some(Overlay::Excludes {
+            selected, scope: _, ..
+        }) = self.overlay.as_mut()
+        {
+            *selected = (*selected).min(row_count.saturating_sub(1));
+        }
+    }
+
     fn collect_quick_index(&mut self) {
         let result = self
             .quick_index_rx
@@ -1940,7 +2200,9 @@ impl App {
         match result {
             Some(Ok(index)) => {
                 self.quick_index_rx = None;
-                if index.root != self.tree.root_path() || index.show_hidden != self.tree.show_hidden
+                if index.root != self.tree.root_path()
+                    || index.show_hidden != self.tree.show_hidden
+                    || index.rules != self.exclude_rules
                 {
                     if let Some(Overlay::QuickOpen { loading, .. }) = self.overlay.as_mut() {
                         *loading = false;
@@ -1985,7 +2247,11 @@ impl App {
         let cached = self
             .quick_index
             .as_ref()
-            .filter(|index| index.root == root && index.show_hidden == show_hidden)
+            .filter(|index| {
+                index.root == root
+                    && index.show_hidden == show_hidden
+                    && index.rules == self.exclude_rules
+            })
             .map(|index| (std::sync::Arc::clone(&index.files), index.truncated));
         let (files, truncated, loading) = if let Some((files, truncated)) = cached {
             (files, truncated, false)
@@ -1993,12 +2259,18 @@ impl App {
             if self.quick_index_rx.is_none() {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let worker_root = root.clone();
+                let rules = self.exclude_rules.clone();
                 std::thread::spawn(move || {
-                    let (files, truncated) =
-                        collect_quick_files(&worker_root, show_hidden, QUICK_OPEN_FILE_LIMIT);
+                    let (files, truncated) = collect_quick_files(
+                        &worker_root,
+                        show_hidden,
+                        &rules,
+                        QUICK_OPEN_FILE_LIMIT,
+                    );
                     let _ = tx.send(QuickIndex {
                         root: worker_root,
                         show_hidden,
+                        rules,
                         files: std::sync::Arc::new(files),
                         truncated,
                     });
@@ -2271,11 +2543,13 @@ impl App {
         let options = *options;
         let root = self.tree.root_path();
         let show_hidden = self.tree.show_hidden;
+        let rules = self.exclude_rules.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = collect_content_hits(
                 &root,
                 show_hidden,
+                &rules,
                 &query,
                 &include,
                 &exclude,
@@ -2289,6 +2563,7 @@ impl App {
             let _ = tx.send(ContentSearchResult {
                 root,
                 show_hidden,
+                rules,
                 query,
                 include,
                 exclude,
@@ -2311,6 +2586,7 @@ impl App {
                 self.content_search_rx = None;
                 if result.root != self.tree.root_path()
                     || result.show_hidden != self.tree.show_hidden
+                    || result.rules != self.exclude_rules
                 {
                     return;
                 }
@@ -2635,6 +2911,49 @@ impl App {
     }
 
     /// Render the centered Settings popup and remember its rect for clicks.
+    fn draw_excludes(&mut self, frame: &mut Frame, area: Rect) {
+        let Some((selected_index, scope)) =
+            self.overlay.as_ref().and_then(|overlay| match overlay {
+                Overlay::Excludes {
+                    selected, scope, ..
+                } => Some((*selected, *scope)),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let rows = self.exclude_rows(scope);
+        let height = usize::from(area.height.max(1));
+        let scroll = keep_visible_scroll(selected_index, height, rows.len());
+        if let Some(Overlay::Excludes {
+            rect,
+            scroll: stored_scroll,
+            ..
+        }) = self.overlay.as_mut()
+        {
+            *rect = area;
+            *stored_scroll = scroll;
+        }
+        let items = rows
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(height)
+            .map(|(index, (_, label))| {
+                let style = if index == selected_index {
+                    selection_style(true)
+                } else if label.ends_with("preset") {
+                    Style::default().bold()
+                } else {
+                    Style::default()
+                };
+                ListItem::new(format!(" {label}")).style(style)
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(List::new(items), area);
+        draw_scrollbar(frame, area, rows.len(), height, scroll);
+    }
+
     fn draw_settings(&mut self, frame: &mut Frame) {
         let rows = self.settings_rows();
         let area = frame.area();
@@ -2903,6 +3222,34 @@ impl App {
             }
             return;
         }
+        if let PromptKind::ExcludePattern {
+            scope,
+            category,
+            index,
+        } = kind
+        {
+            let pattern = input.trim();
+            if pattern.is_empty() || Glob::new(pattern).is_err() {
+                self.notice = Some("invalid exclude glob".into());
+                self.open_excludes();
+                return;
+            }
+            self.apply_excludes(excludes::update(&self.tree.root_path(), scope, |rules| {
+                let patterns = match category {
+                    ExcludeCategory::Files => &mut rules.files,
+                    ExcludeCategory::Search => &mut rules.search,
+                };
+                match index {
+                    Some(index) if index < patterns.len() => patterns[index] = pattern.to_string(),
+                    _ if !patterns.iter().any(|value| value == pattern) => {
+                        patterns.push(pattern.to_string())
+                    }
+                    _ => {}
+                }
+            }));
+            self.open_excludes();
+            return;
+        }
         let Some(name) = actions::validate_name(&input) else {
             self.notice = Some("invalid name".into());
             return;
@@ -2913,6 +3260,7 @@ impl App {
             PromptKind::Rename(path) => actions::rename(path, name),
             PromptKind::ChangeFolder => unreachable!("handled above"),
             PromptKind::CustomEditor => unreachable!("handled above"),
+            PromptKind::ExcludePattern { .. } => unreachable!("handled above"),
         };
         match result {
             Ok(created) => {
@@ -3157,6 +3505,16 @@ impl App {
             return;
         }
         self.draw_header(frame, header);
+
+        if matches!(self.overlay, Some(Overlay::Excludes { .. })) {
+            self.draw_excludes(frame, body);
+            self.body = BodyGeom::default();
+            frame.render_widget(
+                Paragraph::new(" ↑↓ select · enter edit · d delete · tab scope · esc close".dim()),
+                footer,
+            );
+            return;
+        }
 
         if self.rows.is_empty() {
             frame.render_widget(Paragraph::new("  (empty)".dim().italic()), body);
@@ -3452,7 +3810,7 @@ impl App {
         let outer_top = area.y;
         let outer_bottom = area.y + 2;
         let area = Rect::new(area.x, area.y + 1, area.width, 1);
-        let (exp_icon, search_icon, git_icon) = activity_icons(self.theme);
+        let (exp_icon, search_icon, git_icon, exclude_icon) = activity_icons(self.theme);
         let search_active = matches!(self.overlay, Some(Overlay::ContentSearch { .. }));
         // Both FA glyphs (folder, code-fork) render two cells wide in the
         // non-Mono Nerd Font; reserve the second cell in each chip so the
@@ -3469,6 +3827,8 @@ impl App {
             Span::raw(format!(" {search_icon}{slack} ")),
             Span::raw(" "),
             Span::raw(format!(" {git_icon}{slack} ")),
+            Span::raw(" "),
+            Span::raw(format!(" {exclude_icon}{slack} ")),
         ];
         // Hit zones from the actual span widths (emoji vs nerd-glyph widths differ).
         let mut x = area.x;
@@ -3483,6 +3843,7 @@ impl App {
             explorer: bounds[1],
             search: bounds[3],
             source_control: bounds[5],
+            excludes: bounds[7],
         };
         let hovered = |bounds| {
             self.mouse_pos
@@ -3491,10 +3852,21 @@ impl App {
         let explorer_hovered = hovered(bounds[1]);
         let search_hovered = hovered(bounds[3]);
         let git_hovered = hovered(bounds[5]);
+        let excludes_hovered = hovered(bounds[7]);
         spans[1].style = activity_button_style(!search_active, explorer_hovered);
         spans[3].style = activity_button_style(search_active, search_hovered);
         spans[5].style = activity_button_style(false, git_hovered);
-        let (chip_start, chip_end) = if search_active { bounds[3] } else { bounds[1] };
+        spans[7].style = activity_button_style(
+            matches!(self.overlay, Some(Overlay::Excludes { .. })),
+            excludes_hovered,
+        );
+        let (chip_start, chip_end) = if matches!(self.overlay, Some(Overlay::Excludes { .. })) {
+            bounds[7]
+        } else if search_active {
+            bounds[3]
+        } else {
+            bounds[1]
+        };
         draw_activity_caps(
             frame,
             (chip_start, chip_end),
@@ -3506,6 +3878,11 @@ impl App {
             (!search_active, explorer_hovered, bounds[1]),
             (search_active, search_hovered, bounds[3]),
             (false, git_hovered, bounds[5]),
+            (
+                matches!(self.overlay, Some(Overlay::Excludes { .. })),
+                excludes_hovered,
+                bounds[7],
+            ),
         ] {
             if !active && is_hovered {
                 draw_activity_caps(
@@ -4147,7 +4524,12 @@ const CONTENT_SEARCH_MATCH_LIMIT: usize = 1_000;
 const CONTENT_SEARCH_FILE_LIMIT: usize = 20_000;
 const CONTENT_SEARCH_MAX_BYTES: u64 = 1024 * 1024;
 
-fn collect_quick_files(root: &Path, show_hidden: bool, limit: usize) -> (Vec<QuickFile>, bool) {
+fn collect_quick_files(
+    root: &Path,
+    show_hidden: bool,
+    rules: &EffectiveRules,
+    limit: usize,
+) -> (Vec<QuickFile>, bool) {
     let mut files = Vec::new();
     let mut truncated = false;
     let mut builder = ignore::WalkBuilder::new(root);
@@ -4155,7 +4537,23 @@ fn collect_quick_files(root: &Path, show_hidden: bool, limit: usize) -> (Vec<Qui
         .hidden(!show_hidden)
         .follow_links(false)
         .require_git(false)
-        .filter_entry(|entry| entry.file_name() != ".git");
+        .git_ignore(rules.use_ignore_files)
+        .git_exclude(rules.use_ignore_files)
+        .git_global(rules.use_ignore_files);
+    let excluded = compile_exclude_globs(&rules.search);
+    let root_for_filter = root.to_path_buf();
+    builder.filter_entry(move |entry| {
+        entry.file_name() != ".git"
+            && !excluded.as_ref().is_some_and(|patterns| {
+                let label = entry
+                    .path()
+                    .strip_prefix(&root_for_filter)
+                    .unwrap_or(entry.path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                patterns.is_match(label)
+            })
+    });
     for entry in builder.build().flatten() {
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
@@ -4184,6 +4582,7 @@ fn collect_quick_files(root: &Path, show_hidden: bool, limit: usize) -> (Vec<Qui
 fn collect_content_hits(
     root: &Path,
     show_hidden: bool,
+    rules: &EffectiveRules,
     query: &str,
     include: &str,
     exclude: &str,
@@ -4211,7 +4610,7 @@ fn collect_content_hits(
     let includes = build_search_globs(include, "include")?;
     let excludes = build_search_globs(exclude, "exclude")?;
     let (files, file_limit_reached) =
-        collect_quick_files(root, show_hidden, CONTENT_SEARCH_FILE_LIMIT);
+        collect_quick_files(root, show_hidden, rules, CONTENT_SEARCH_FILE_LIMIT);
     let mut hits = Vec::new();
     for file in files {
         if includes
@@ -4261,6 +4660,19 @@ fn collect_content_hits(
         }
     }
     Ok((hits, file_limit_reached))
+}
+
+fn compile_exclude_globs(patterns: &[String]) -> Option<GlobSet> {
+    if patterns.is_empty() {
+        return None;
+    }
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        if let Ok(glob) = Glob::new(pattern) {
+            builder.add(glob);
+        }
+    }
+    builder.build().ok()
 }
 
 fn build_search_globs(raw: &str, label: &str) -> Result<Option<GlobSet>, String> {
@@ -4735,6 +5147,14 @@ fn rebuild_tree_rows(
 mod tests {
     use super::*;
 
+    fn default_exclude_rules() -> EffectiveRules {
+        EffectiveRules {
+            files: Vec::new(),
+            search: Vec::new(),
+            use_ignore_files: true,
+        }
+    }
+
     #[test]
     fn collapse_button_hit_region_is_header_right_edge() {
         assert!(hits_collapse_button(30, 49, 32, 50), "footer right edge");
@@ -5058,7 +5478,8 @@ mod tests {
         std::fs::write(root.join("target/generated.rs"), "").unwrap();
         std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
 
-        let (hidden_off, truncated) = collect_quick_files(&root, false, 20);
+        let (hidden_off, truncated) =
+            collect_quick_files(&root, false, &default_exclude_rules(), 20);
         assert!(!truncated);
         assert_eq!(
             hidden_off
@@ -5067,7 +5488,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["src/main.rs"]
         );
-        let (hidden_on, _) = collect_quick_files(&root, true, 20);
+        let (hidden_on, _) = collect_quick_files(&root, true, &default_exclude_rules(), 20);
         assert_eq!(
             hidden_on
                 .iter()
@@ -5096,9 +5517,17 @@ mod tests {
         std::fs::write(root.join("target/generated.rs"), "needle\n").unwrap();
         std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
 
-        let (visible, truncated) =
-            collect_content_hits(&root, false, "NEEDLE", "", "", SearchOptions::default(), 20)
-                .unwrap();
+        let (visible, truncated) = collect_content_hits(
+            &root,
+            false,
+            &default_exclude_rules(),
+            "NEEDLE",
+            "",
+            "",
+            SearchOptions::default(),
+            20,
+        )
+        .unwrap();
         assert!(!truncated);
         assert_eq!(
             visible
@@ -5107,15 +5536,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("src/main.rs", 2), ("src/main.rs", 3)]
         );
-        let (with_hidden, _) =
-            collect_content_hits(&root, true, "needle", "", "", SearchOptions::default(), 20)
-                .unwrap();
+        let (with_hidden, _) = collect_content_hits(
+            &root,
+            true,
+            &default_exclude_rules(),
+            "needle",
+            "",
+            "",
+            SearchOptions::default(),
+            20,
+        )
+        .unwrap();
         assert_eq!(with_hidden.len(), 3);
         assert!(with_hidden.iter().any(|hit| hit.label == ".secret"));
 
         let (included, _) = collect_content_hits(
             &root,
             true,
+            &default_exclude_rules(),
             "needle",
             "src/**",
             "",
@@ -5127,6 +5565,7 @@ mod tests {
         let (excluded, _) = collect_content_hits(
             &root,
             true,
+            &default_exclude_rules(),
             "needle",
             "",
             "src/**",
@@ -5136,6 +5575,47 @@ mod tests {
         .unwrap();
         assert_eq!(excluded.len(), 1);
         assert_eq!(excluded[0].label, ".secret");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quick_open_and_content_search_use_search_exclude_and_git_ignore_setting() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-exclude-search-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("ignored")).unwrap();
+        std::fs::write(root.join("ignored/visible-when-ignore-off.rs"), "needle\n").unwrap();
+        std::fs::write(root.join("generated.class"), "needle\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+        let rules = EffectiveRules {
+            files: Vec::new(),
+            search: vec!["**/*.class".into()],
+            use_ignore_files: false,
+        };
+
+        let (files, _) = collect_quick_files(&root, false, &rules, 20);
+        assert!(
+            files
+                .iter()
+                .any(|file| file.label == "ignored/visible-when-ignore-off.rs")
+        );
+        assert!(!files.iter().any(|file| file.label == "generated.class"));
+
+        let (hits, _) = collect_content_hits(
+            &root,
+            false,
+            &rules,
+            "needle",
+            "",
+            "",
+            SearchOptions::default(),
+            20,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].label, "ignored/visible-when-ignore-off.rs");
         std::fs::remove_dir_all(root).unwrap();
     }
 

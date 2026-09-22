@@ -4651,7 +4651,12 @@ fn highlighted_search_context(
     spans
 }
 
-const QUICK_OPEN_FILE_LIMIT: usize = 20_000;
+// Quick Open keeps the index in memory so subsequent queries are instant. The
+// former 20k cap made ordinary monorepos silently unsearchable: a file found
+// after that point was never considered, even when its full name was typed.
+// Keep a generous safety bound for pathological trees while covering large
+// multi-project workspaces.
+const QUICK_OPEN_FILE_LIMIT: usize = 200_000;
 const CONTENT_SEARCH_MATCH_LIMIT: usize = 1_000;
 const CONTENT_SEARCH_FILE_LIMIT: usize = 20_000;
 const CONTENT_SEARCH_MAX_BYTES: u64 = 1024 * 1024;
@@ -5673,6 +5678,39 @@ mod tests {
                 .map(|file| file.label.as_str())
                 .collect::<Vec<_>>(),
             vec![".gitignore", ".secret", "src/main.rs"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quick_open_indexes_files_beyond_the_legacy_twenty_thousand_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-quick-open-large-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..20_000 {
+            std::fs::write(root.join(format!("filler-{index:05}.txt")), "").unwrap();
+        }
+        std::fs::write(root.join("SampleBbsController.java"), "").unwrap();
+
+        let (files, truncated) = collect_quick_files(
+            &root,
+            false,
+            &EffectiveRules {
+                files: Vec::new(),
+                search: Vec::new(),
+                use_ignore_files: false,
+            },
+            QUICK_OPEN_FILE_LIMIT,
+        );
+
+        assert!(!truncated);
+        assert!(
+            files
+                .iter()
+                .any(|file| file.label == "SampleBbsController.java")
         );
         std::fs::remove_dir_all(root).unwrap();
     }

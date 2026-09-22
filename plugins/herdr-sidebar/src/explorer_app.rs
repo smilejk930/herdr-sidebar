@@ -2260,6 +2260,7 @@ impl App {
             }
             ExcludeRow::Preset => self.apply_excludes(excludes::apply_web_application_preset(
                 &self.tree.root_path(),
+                scope,
             )),
         }
     }

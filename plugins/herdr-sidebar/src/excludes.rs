@@ -125,19 +125,29 @@ pub fn update(root: &Path, scope: Scope, update: impl FnOnce(&mut Rules)) -> Eff
         let _ = std::fs::create_dir_all(parent);
     }
     let mut file = read(&path);
+    let effective = update_file(&mut file, root, scope, update);
+    if let Ok(json) = serde_json::to_string(&file) {
+        let _ = std::fs::write(path, json);
+    }
+    effective
+}
+
+fn update_file(
+    file: &mut File,
+    root: &Path,
+    scope: Scope,
+    update: impl FnOnce(&mut Rules),
+) -> EffectiveRules {
     match scope {
         Scope::Global => update(&mut file.global),
         Scope::Project => update(file.projects.entry(project_key(root)).or_default()),
-    }
-    if let Ok(json) = serde_json::to_string(&file) {
-        let _ = std::fs::write(path, json);
     }
     combine(&file.global, file.projects.get(&project_key(root)))
 }
 
 /// Install the built-in example for a typical web application workspace.
-pub fn apply_web_application_preset(root: &Path) -> EffectiveRules {
-    update(root, Scope::Project, apply_web_application_rules)
+pub fn apply_web_application_preset(root: &Path, scope: Scope) -> EffectiveRules {
+    update(root, scope, apply_web_application_rules)
 }
 
 fn apply_web_application_rules(rules: &mut Rules) {
@@ -178,5 +188,26 @@ mod tests {
             ]
         );
         assert_eq!(rules.use_ignore_files, Some(false));
+    }
+
+    #[test]
+    fn web_application_preset_updates_the_scope_selected_by_the_user() {
+        let root = Path::new("/workspace/example");
+        let mut file = File::default();
+
+        update_file(&mut file, root, Scope::Global, apply_web_application_rules);
+
+        assert!(file.projects.is_empty());
+        assert!(file.global.files.is_empty());
+        assert_eq!(
+            file.global.search,
+            [
+                "**/.git",
+                "**/.next",
+                "**/build",
+                "**/node_modules",
+                "**/*.class"
+            ]
+        );
     }
 }

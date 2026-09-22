@@ -23,9 +23,22 @@ else
   (cd "$fixture" && shasum -a 256 "$asset" > SHA256SUMS)
 fi
 
-HS_TEST_MODE=1 HS_FETCH_DIR="$fixture" HS_OUT="$out" HS_CARGO_TOML="$PWD/Cargo.toml" \
+HS_TEST_MODE=1 HS_RELEASE_TAG="v$version" HS_FETCH_DIR="$fixture" HS_OUT="$out" HS_CARGO_TOML="$PWD/Cargo.toml" \
   sh scripts/fetch-or-build.sh
 cmp "$fixture/$asset" "$out"
+
+# An untagged checkout must use its own source even when an upstream asset has
+# the same Cargo version. This is the fork/dev-branch regression case.
+marker="$root/untagged-fallback"
+stub="$root/untagged-cargo"
+cat > "$stub" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" > "$HS_FALLBACK_MARKER"
+EOF
+chmod +x "$stub"
+HS_TEST_MODE=1 HS_FETCH_DIR="$fixture" HS_OUT="$out" HS_CARGO_TOML="$PWD/Cargo.toml" \
+  HS_CARGO="$stub" HS_FALLBACK_MARKER="$marker" sh scripts/fetch-or-build.sh
+grep -Fx 'build --release' "$marker"
 
 rm -f "$fixture/$asset"
 marker="$root/fallback"

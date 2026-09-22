@@ -256,6 +256,7 @@ fn main() -> std::io::Result<()> {
             .then_some(false)
     };
     let mut quick_open_on_open = initial_activity == Some(ensure::Target::QuickOpen);
+    let mut excludes_on_open = false;
     let result = loop {
         let exit = match view {
             View::Explorer => run_explorer(
@@ -266,6 +267,7 @@ fn main() -> std::io::Result<()> {
                 &spawn_cwd,
                 std::mem::take(&mut search_on_open),
                 std::mem::take(&mut quick_open_on_open),
+                std::mem::take(&mut excludes_on_open),
             ),
             View::SourceControl => run_scm(
                 &mut terminal,
@@ -287,6 +289,10 @@ fn main() -> std::io::Result<()> {
             Ok(Exit::QuickOpen) => {
                 view = View::Explorer;
                 quick_open_on_open = true;
+            }
+            Ok(Exit::Excludes) => {
+                view = View::Explorer;
+                excludes_on_open = true;
             }
             Err(e) => break Err(e),
         }
@@ -363,6 +369,7 @@ fn run_explorer(
     spawn_cwd: &std::path::Path,
     search_on_open: Option<bool>,
     quick_open_on_open: bool,
+    excludes_on_open: bool,
 ) -> std::io::Result<Exit> {
     let root = resolve_root(root_key, legacy_workspace_label, spawn_cwd)?;
     let mut remembered_root = root.clone();
@@ -372,6 +379,9 @@ fn run_explorer(
     }
     if quick_open_on_open {
         app.open_quick_open();
+    }
+    if excludes_on_open {
+        app.open_excludes();
     }
     loop {
         terminal.draw(|frame| app.draw(frame))?;

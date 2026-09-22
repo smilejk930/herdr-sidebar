@@ -87,6 +87,8 @@ pub enum Exit {
     },
     /// Switch to Explorer and open its Quick Open picker.
     QuickOpen,
+    /// Switch to Explorer and open its Exclude activity overlay.
+    Excludes,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

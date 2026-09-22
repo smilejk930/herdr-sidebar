@@ -20,10 +20,22 @@ try {
     $env:HS_OUT_DIR = $Out
     $env:HS_CARGO_TOML = (Resolve-Path Cargo.toml).Path
     $env:HS_ARCH = 'AMD64'
+    $env:HS_RELEASE_TAG = "v$Version"
     & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-or-build.ps1
     if ($LASTEXITCODE -ne 0) { throw 'prebuilt install test failed' }
     if ((Get-FileHash (Join-Path $Out 'herdr-sidebar.exe')).Hash -ne (Get-FileHash (Join-Path $Fixture $Assets[0])).Hash) { throw 'main binary mismatch' }
     if ((Get-FileHash (Join-Path $Out 'herdr-sidebar-ensure.exe')).Hash -ne (Get-FileHash (Join-Path $Fixture $Assets[1])).Hash) { throw 'ensure binary mismatch' }
+
+    # An untagged fork/dev checkout must build its own source, even when an
+    # upstream asset has the same Cargo version.
+    Remove-Item Env:HS_RELEASE_TAG -ErrorAction SilentlyContinue
+    $Marker = Join-Path $Root 'untagged-fallback.txt'
+    $Stub = Join-Path $Root 'untagged-cargo.cmd'
+    [IO.File]::WriteAllText($Stub, "@echo off`r`necho %* > `"$Marker`"`r`n", (New-Object Text.ASCIIEncoding))
+    $env:HS_CARGO = $Stub
+    & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-or-build.ps1
+    if ($LASTEXITCODE -ne 0) { throw 'untagged source fallback test failed' }
+    if ((Get-Content -LiteralPath $Marker -Raw).Trim() -ne 'build --release') { throw 'untagged checkout did not invoke cargo fallback' }
 
     Remove-Item -LiteralPath (Join-Path $Fixture $Assets[1]) -Force
     $Marker = Join-Path $Root 'fallback.txt'
@@ -41,6 +53,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'checksum fallback test failed' }
     if ((Get-Content -LiteralPath $Marker -Raw).Trim() -ne 'build --release') { throw 'checksum mismatch did not invoke cargo fallback' }
 } finally {
-    Remove-Item Env:HS_FETCH_DIR,Env:HS_TEST_MODE,Env:HS_OUT_DIR,Env:HS_CARGO_TOML,Env:HS_ARCH,Env:HS_CARGO -ErrorAction SilentlyContinue
+    Remove-Item Env:HS_FETCH_DIR,Env:HS_TEST_MODE,Env:HS_OUT_DIR,Env:HS_CARGO_TOML,Env:HS_ARCH,Env:HS_CARGO,Env:HS_RELEASE_TAG -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
 }

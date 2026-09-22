@@ -82,6 +82,18 @@ esac
 version=$(grep -E '^version *= *"' "$cargo_toml" 2>/dev/null | head -n 1 | sed -E 's/^version *= *"([^"]+)".*/\1/')
 [ -n "$version" ] || fallback "could not read the crate version"
 
+# A fork branch can keep the released Cargo version while changing its source.
+# Never replace that checkout with upstream's same-version binary: it would run
+# code unrelated to the requested ref. Only an exact vX.Y.Z checkout may use
+# the verified release asset. HS_RELEASE_TAG keeps this branch testable without
+# creating tags in the developer's working tree.
+if [ "$test_mode" = 1 ] && [ -n "${HS_RELEASE_TAG:-}" ]; then
+  release_tag=$HS_RELEASE_TAG
+else
+  release_tag=$(git -C "$repo_root" describe --exact-match --tags HEAD 2>/dev/null || true)
+fi
+[ "$release_tag" = "v$version" ] || fallback "checkout is not the v$version release"
+
 asset="herdr-sidebar-$triple"
 tmpdir=$(mktemp -d 2>/dev/null) || fallback "could not create a temporary directory"
 trap cleanup EXIT

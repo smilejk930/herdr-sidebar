@@ -1099,6 +1099,22 @@ impl App {
             }
             return None;
         }
+        // Exclude is the fourth activity, not a dead-end dialog: its number
+        // keys retain the same navigation contract as every other activity.
+        if matches!(self.overlay, Some(Overlay::Excludes { .. })) && key.modifiers.is_empty() {
+            match key.code {
+                KeyCode::Char('1') => {
+                    self.overlay = None;
+                    return None;
+                }
+                KeyCode::Char('2') => {
+                    self.open_content_search(false);
+                    return None;
+                }
+                KeyCode::Char('3') => return self.switch_to(View::SourceControl),
+                _ => {}
+            }
+        }
         // View switching from the keyboard, VS Code's activity-bar order:
         // 1 Explorer, 2 Search, 3 Source Control. Ctrl+1/2/3 always switch (an
         // editor's group-focus chord), so they work even mid-word in a focused
@@ -2032,7 +2048,7 @@ impl App {
         });
     }
 
-    fn open_excludes(&mut self) {
+    pub fn open_excludes(&mut self) {
         self.suspend_search_for_modal();
         self.overlay = Some(Overlay::Excludes {
             selected: 0,
@@ -3757,7 +3773,12 @@ impl App {
             ("q", "quit"),
         ];
         if self.merged() {
-            hints.extend([("1", "files"), ("2", "search"), ("3", "git")]);
+            hints.extend([
+                ("1", "files"),
+                ("2", "search"),
+                ("3", "git"),
+                ("4", "excludes"),
+            ]);
         }
         hints
     }

@@ -65,6 +65,16 @@ $VersionMatch = Select-String -Path $CargoToml -Pattern '^version\s*=\s*"([^"]+)
 if (-not $VersionMatch) { Build-HsFromSource 'could not read the crate version' }
 $Version = $VersionMatch.Matches[0].Groups[1].Value
 
+# A fork branch can retain the released Cargo version while carrying different
+# source. Only an exact release tag may use the upstream release binary.
+# HS_RELEASE_TAG is a test seam, avoiding mutation of a developer checkout.
+$ReleaseTag = if ($TestMode -and $env:HS_RELEASE_TAG) {
+    $env:HS_RELEASE_TAG
+} else {
+    try { (& git -C $RepoRoot describe --exact-match --tags HEAD 2>$null | Select-Object -First 1).Trim() } catch { '' }
+}
+if ($ReleaseTag -ne "v$Version") { Build-HsFromSource "checkout is not the v$Version release" }
+
 $Assets = @(
     "herdr-sidebar-$Triple.exe",
     "herdr-sidebar-ensure-$Triple.exe"

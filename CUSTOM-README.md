@@ -18,6 +18,9 @@ herdr plugin uninstall herdr-sidebar
 herdr plugin install smilejk930/herdr-sidebar/plugins/herdr-sidebar --ref dev --yes
 ```
 
+`dev`는 release tag가 아닌 개발 브랜치이므로, 설치 과정에서 해당 checkout의 소스를
+release build합니다. 따라서 Rust 1.89 이상과 Cargo가 필요합니다.
+
 설치 후 Herdr를 다시 열거나 sidebar를 토글합니다.
 
 ```bash

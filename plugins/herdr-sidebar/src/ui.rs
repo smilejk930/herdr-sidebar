@@ -489,7 +489,6 @@ pub enum TitleAction {
     NewFile,
     NewFolder,
     Refresh,
-    RevealPreview,
     CollapseAll,
 }
 
@@ -512,12 +511,10 @@ pub fn title_action_icon(theme: IconTheme, action: TitleAction) -> &'static str 
         (IconTheme::Material, TitleAction::NewFile) => "\u{ea7f}", //  cod-new_file
         (IconTheme::Material, TitleAction::NewFolder) => "\u{ea80}", //  cod-new_folder
         (IconTheme::Material, TitleAction::Refresh) => "\u{eb37}", //  cod-refresh
-        (IconTheme::Material, TitleAction::RevealPreview) => "\u{ea6c}", // cod-go_to_file
         (IconTheme::Material, TitleAction::CollapseAll) => "\u{eac5}", //  cod-collapse_all
         (IconTheme::Emoji, TitleAction::NewFile) => "📄",
         (IconTheme::Emoji, TitleAction::NewFolder) => "📁",
         (IconTheme::Emoji, TitleAction::Refresh) => "⟳",
-        (IconTheme::Emoji, TitleAction::RevealPreview) => "⊙",
         (IconTheme::Emoji, TitleAction::CollapseAll) => "⊟",
     }
 }

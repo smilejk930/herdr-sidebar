@@ -191,6 +191,9 @@ enum Request {
         path: PathBuf,
         /// One-based source line to place at the top of the preview.
         line: Option<usize>,
+        /// Explorer root that originated this request. It lets the preview
+        /// reveal the file in the matching sidebar without guessing a root.
+        root: Option<PathBuf>,
     },
     Diff {
         root: PathBuf,
@@ -212,9 +215,19 @@ pub fn file_request(path: &Path) -> String {
     format!("file\t{}", path.display())
 }
 
+/// File preview request that can reveal itself in the originating Explorer.
+pub fn file_request_in(root: &Path, path: &Path) -> String {
+    format!("file\t{}\t\t{}", path.display(), root.display())
+}
+
 /// Control-file payload for a file preview anchored to a one-based source line.
 pub fn file_request_at(path: &Path, line: usize) -> String {
     format!("file\t{}\t{line}", path.display())
+}
+
+/// Line-anchored file preview request that retains its Explorer root.
+pub fn file_request_at_in(root: &Path, path: &Path, line: usize) -> String {
+    format!("file\t{}\t{line}\t{}", path.display(), root.display())
 }
 
 /// Control-file payload for a git diff (`kind`: staged | worktree | untracked).
@@ -248,17 +261,23 @@ fn parse_request(raw: &str) -> Option<Request> {
             let path = parts.next().filter(|p| !p.is_empty()).map(str::to_string);
             Some(Request::Show { root, spec, path })
         }
-        Some("file") => Some(Request::File {
-            path: PathBuf::from(parts.next()?),
-            line: parts
+        Some("file") => {
+            let path = PathBuf::from(parts.next()?);
+            let line = parts
                 .next()
                 .and_then(|line| line.parse().ok())
-                .filter(|line| *line > 0),
-        }),
+                .filter(|line| *line > 0);
+            let root = parts
+                .next()
+                .filter(|root| !root.is_empty())
+                .map(PathBuf::from);
+            Some(Request::File { path, line, root })
+        }
         // Legacy: a bare path.
         _ => Some(Request::File {
             path: PathBuf::from(raw),
             line: None,
+            root: None,
         }),
     }
 }
@@ -266,9 +285,12 @@ fn parse_request(raw: &str) -> Option<Request> {
 fn request_payload(request: &Request) -> String {
     match request {
         Request::Close => "close".into(),
-        Request::File { path, line } => line
-            .map(|line| file_request_at(path, line))
-            .unwrap_or_else(|| file_request(path)),
+        Request::File { path, line, root } => match (line, root) {
+            (Some(line), Some(root)) => file_request_at_in(root, path, *line),
+            (None, Some(root)) => file_request_in(root, path),
+            (Some(line), None) => file_request_at(path, *line),
+            (None, None) => file_request(path),
+        },
         Request::Diff { root, rel, kind } => diff_request(root, rel, kind),
         Request::Show { root, spec, path } => show_request(root, spec, path.as_deref()),
     }
@@ -670,7 +692,7 @@ fn load(request: &Request) -> Doc {
             pending_src: None,
             selection: PreviewSelection::default(),
         },
-        Request::File { path, line } => load_file(path, *line),
+        Request::File { path, line, .. } => load_file(path, *line),
         Request::Diff { root, rel, kind } => load_diff(root, rel, kind),
         Request::Show { root, spec, path } => load_show(root, spec, path.as_deref()),
     }
@@ -802,6 +824,35 @@ fn restore_current_control(control: &Path, current: &Option<Request>) {
     if let Some(request) = current {
         let _ = write_scratch_file(control, &request_payload(request));
     }
+}
+
+/// Publish a file selection to the originating Explorer. The Explorer's
+/// regular shared-tree sync applies it within one polling interval.
+fn reveal_in_explorer(root: &Path, path: &Path) {
+    if !path.starts_with(root) {
+        return;
+    }
+    let state = revealed_tree_state(root, path, crate::state::load_tree_state(root));
+    crate::state::save_tree_state(root, &state);
+}
+
+fn revealed_tree_state(
+    root: &Path,
+    path: &Path,
+    mut state: crate::state::TreeState,
+) -> crate::state::TreeState {
+    let mut parent = path.parent().map(Path::to_path_buf);
+    while let Some(dir) = parent {
+        if dir == root {
+            break;
+        }
+        parent = dir.parent().map(Path::to_path_buf);
+        if !state.expanded.contains(&dir) {
+            state.expanded.push(dir);
+        }
+    }
+    state.selected = Some(path.to_path_buf());
+    state
 }
 
 /// `git show` with stat + patch, colored — what a click on a commit, stash,
@@ -1598,6 +1649,7 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                     doc,
                     theme,
                     matches!(current, Some(Request::File { .. })),
+                    matches!(current, Some(Request::File { root: Some(_), .. })),
                     notice.as_deref(),
                 );
             }
@@ -1748,6 +1800,16 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                                     KeyCode::Esc | KeyCode::Char('q') => {
                                         should_close = close_own_pane(control);
                                     }
+                                    KeyCode::Char('r')
+                                        if let Some(Request::File {
+                                            path,
+                                            root: Some(root),
+                                            ..
+                                        }) = current.as_ref() =>
+                                    {
+                                        reveal_in_explorer(root, path);
+                                        notice = Some("revealed in Explorer".into());
+                                    }
                                     KeyCode::Char('e') => {
                                         if doc.media.is_some() {
                                             notice = Some("media previews are read-only".into());
@@ -1847,6 +1909,19 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                                 if mouse.row == 0 && mouse.column < 3 =>
                             {
                                 should_close = close_own_pane(control);
+                            }
+                            MouseEventKind::Down(MouseButton::Left)
+                                if mouse.row == 0 && (3..6).contains(&mouse.column) =>
+                            {
+                                if let Some(Request::File {
+                                    path,
+                                    root: Some(root),
+                                    ..
+                                }) = current.as_ref()
+                                {
+                                    reveal_in_explorer(root, path);
+                                    notice = Some("revealed in Explorer".into());
+                                }
                             }
                             _ => doc.on_mouse(&mouse, preview_body),
                         }
@@ -1967,6 +2042,7 @@ fn draw_doc(
     doc: &mut Doc,
     theme: IconTheme,
     editable: bool,
+    revealable: bool,
     notice: Option<&str>,
 ) -> (usize, Rect) {
     let area = frame.area();
@@ -1988,11 +2064,20 @@ fn draw_doc(
 
     let file_icon = icon(theme, &doc.name, false, false);
     let icon_style = ui_icon_style(file_icon.rgb);
-    let left = vec![
-        Span::styled(" ✕ ", Style::default().bold().fg(palette().header_accent)),
+    let mut left = vec![Span::styled(
+        " ✕ ",
+        Style::default().bold().fg(palette().header_accent),
+    )];
+    if revealable {
+        left.push(Span::styled(
+            " ⊙ ",
+            Style::default().fg(palette().header_accent),
+        ));
+    }
+    left.extend([
         Span::styled(format!("{} ", file_icon.glyph), icon_style),
         Span::styled(doc.name.clone(), Style::default().bold()),
-    ];
+    ]);
     let used: usize = left.iter().map(Span::width).sum();
     let avail = usize::from(area.width).saturating_sub(used + 2);
     let shown = if doc.context.chars().count() > avail {
@@ -2034,6 +2119,7 @@ fn draw_doc(
     } else {
         "w: wrap off"
     };
+    let reveal_hint = revealable.then_some("r reveal  ").unwrap_or("");
     let hint = if let Some(notice) = notice {
         format!(" {notice}")
     } else if let Some(media) = &doc.media {
@@ -2043,9 +2129,9 @@ fn draw_doc(
             " image preview  q close".into()
         }
     } else if editable {
-        format!(" drag select  Ctrl/Cmd+C copy  e edit  {wrap_hint}  q close")
+        format!(" drag select  Ctrl/Cmd+C copy  e edit  {reveal_hint}{wrap_hint}  q close")
     } else {
-        format!(" drag select  Ctrl/Cmd+C copy  ↑↓ scroll  {wrap_hint}  q close")
+        format!(" drag select  Ctrl/Cmd+C copy  {reveal_hint}↑↓ scroll  {wrap_hint}  q close")
     };
     frame.render_widget(Paragraph::new(Line::from(hint).dim()), footer);
     (usize::from(body.height).saturating_sub(1).max(1), body)
@@ -3273,7 +3359,7 @@ mod tests {
         let render = |terminal: &mut Terminal<TestBackend>, doc: &mut Doc| -> Vec<String> {
             terminal
                 .draw(|f| {
-                    draw_doc(f, doc, IconTheme::Emoji, false, None);
+                    draw_doc(f, doc, IconTheme::Emoji, false, false, None);
                 })
                 .unwrap();
             terminal
@@ -3318,7 +3404,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(16, 6)).unwrap();
         terminal
             .draw(|f| {
-                draw_doc(f, &mut doc, IconTheme::Emoji, false, None);
+                draw_doc(f, &mut doc, IconTheme::Emoji, false, false, None);
             })
             .unwrap();
         assert_eq!(doc.rows.len(), 1);
@@ -3949,6 +4035,7 @@ mod tests {
             Some(Request::File {
                 path: PathBuf::from("C:/x/y.rs"),
                 line: None,
+                root: None,
             })
         );
         let f = file_request_at(Path::new("C:/x/y.rs"), 42);
@@ -3957,6 +4044,16 @@ mod tests {
             Some(Request::File {
                 path: PathBuf::from("C:/x/y.rs"),
                 line: Some(42),
+                root: None,
+            })
+        );
+        let f = file_request_in(Path::new("C:/repo"), Path::new("C:/x/y.rs"));
+        assert_eq!(
+            parse_request(&f),
+            Some(Request::File {
+                path: PathBuf::from("C:/x/y.rs"),
+                line: None,
+                root: Some(PathBuf::from("C:/repo")),
             })
         );
         let s = show_request(Path::new("C:/repo"), "stash@{1}", None);
@@ -3992,9 +4089,24 @@ mod tests {
             Some(Request::File {
                 path: PathBuf::from("C:/plain.txt"),
                 line: None,
+                root: None,
             })
         );
         assert_eq!(parse_request("  "), None);
+    }
+
+    #[test]
+    fn preview_reveal_expands_ancestors_and_selects_the_file() {
+        let root = Path::new("/workspace/repo");
+        let path = root.join("src").join("feature").join("example.rs");
+
+        let state = revealed_tree_state(root, &path, crate::state::TreeState::default());
+
+        assert_eq!(state.selected, Some(path));
+        assert_eq!(
+            state.expanded,
+            vec![root.join("src").join("feature"), root.join("src")]
+        );
     }
 
     #[test]

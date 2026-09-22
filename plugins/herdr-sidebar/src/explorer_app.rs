@@ -4978,35 +4978,32 @@ fn quick_matches(files: &[QuickFile], query: &str) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, file)| {
-            fuzzy_score_lowercased(&query_lower, quick_file_name(&file.label_lower))
-                .map(|score| (index, score))
+            let file_name_score =
+                fuzzy_score_lowercased(&query_lower, quick_file_name(&file.label_lower));
+            let path_score = fuzzy_score_lowercased(&query_lower, &file.label_lower);
+            file_name_score
+                .or(path_score)
+                .map(|score| (index, file_name_score.is_some(), score))
         })
         .collect::<Vec<_>>();
-    // File names are the primary Quick Open target. Searching the full path
-    // first lets unrelated directory names drown out exact file-name matches.
-    // Retain the path fallback for queries such as "src/main" that cannot
-    // possibly match a base name.
-    if ranked.is_empty() {
-        ranked = files
-            .iter()
-            .enumerate()
-            .filter_map(|(index, file)| {
-                fuzzy_score_lowercased(&query_lower, &file.label_lower).map(|score| (index, score))
-            })
-            .collect();
-    }
-    ranked.sort_by(|(left_index, left_score), (right_index, right_score)| {
-        right_score
-            .cmp(left_score)
-            .then_with(|| {
-                files[*left_index]
-                    .label
-                    .len()
-                    .cmp(&files[*right_index].label.len())
-            })
-            .then_with(|| files[*left_index].label.cmp(&files[*right_index].label))
-    });
-    ranked.into_iter().map(|(index, _)| index).collect()
+    // File names are the primary Quick Open target, but path-only matches
+    // remain valid results. Dropping them whenever a file-name match exists
+    // makes legitimate directory searches appear to fail.
+    ranked.sort_by(
+        |(left_index, left_file_name, left_score), (right_index, right_file_name, right_score)| {
+            right_file_name
+                .cmp(left_file_name)
+                .then_with(|| right_score.cmp(left_score))
+                .then_with(|| {
+                    files[*left_index]
+                        .label
+                        .len()
+                        .cmp(&files[*right_index].label.len())
+                })
+                .then_with(|| files[*left_index].label.cmp(&files[*right_index].label))
+        },
+    );
+    ranked.into_iter().map(|(index, _, _)| index).collect()
 }
 
 fn quick_file_name(label: &str) -> &str {
@@ -5674,7 +5671,9 @@ mod tests {
             },
         ];
 
-        assert_eq!(quick_matches(&files, "samplebbs"), vec![0, 1]);
+        // A file-name match should rank first, but it must not discard a
+        // path-only match. The query also matches `sample/bbs/...`.
+        assert_eq!(quick_matches(&files, "samplebbs"), vec![0, 1, 2]);
     }
 
     #[test]

@@ -192,6 +192,18 @@ impl ExcludeCategory {
     }
 }
 
+/// Always-visible controls for the Exclude activity. These are rendered as
+/// footer chips so narrow sidebars can wrap them instead of clipping text.
+fn exclude_hints() -> [(&'static str, &'static str); 5] {
+    [
+        ("↑↓", "select"),
+        ("⏎", "edit"),
+        ("d", "delete"),
+        ("tab", "scope"),
+        ("esc", "close"),
+    ]
+}
+
 /// A modal layered over the tree: the context menu, a name prompt, or a
 /// delete confirmation. While one is open it owns keyboard and mouse input.
 enum Overlay {
@@ -3592,15 +3604,20 @@ impl App {
         if self.excludes_activity_active() {
             self.draw_excludes(frame, body);
             self.body = BodyGeom::default();
-            let footer_line = match &self.overlay {
+            match &self.overlay {
                 Some(Overlay::Prompt {
                     title,
                     input,
                     kind: PromptKind::ExcludePattern { .. },
-                }) => format!(" {title}: {input}█"),
-                _ => " ↑↓ select · enter edit · d delete · tab scope · esc close".into(),
-            };
-            frame.render_widget(Paragraph::new(footer_line), footer);
+                }) => frame.render_widget(Paragraph::new(format!(" {title}: {input}█")), footer),
+                // Keep every control discoverable in a narrow pane. Unlike
+                // the old single Paragraph, hint chips wrap and the footer
+                // height is calculated from the same lines.
+                _ => frame.render_widget(
+                    Paragraph::new(wrap_hints(&exclude_hints(), footer.width, 0)),
+                    footer,
+                ),
+            }
             return;
         }
 
@@ -3886,6 +3903,8 @@ impl App {
             wrap_footer_message(&msg, width, 4).len() as u16
         } else if matches!(self.overlay, Some(Overlay::Prompt { .. })) {
             1
+        } else if matches!(self.overlay, Some(Overlay::Excludes { .. })) {
+            wrap_hints(&exclude_hints(), width, 0).len() as u16
         } else if self.show_hotkeys() {
             wrap_hints(&self.hints(), width, 3).len() as u16
         } else if git_footer {
@@ -5300,6 +5319,18 @@ mod tests {
             })
         ));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exclude_footer_hints_wrap_without_clipping_in_narrow_panes() {
+        let width = 16;
+        let lines = wrap_hints(&exclude_hints(), width, 0);
+
+        assert!(lines.len() > 1, "narrow Exclude footer should wrap");
+        assert!(
+            lines.iter().all(|line| line.width() <= width as usize),
+            "every Exclude footer line must fit the pane"
+        );
     }
 
     #[test]

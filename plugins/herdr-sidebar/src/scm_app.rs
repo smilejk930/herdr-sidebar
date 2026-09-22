@@ -1426,6 +1426,23 @@ impl App {
         // hover title-bar buttons until the linger expires.
         self.last_mouse = Some(std::time::Instant::now());
         self.mouse_pos = Some((mouse.column, mouse.row));
+        // The activity bar is global navigation. It must remain clickable
+        // while a settings/menu modal is present, just like the number keys.
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.merged() {
+            let zones = self.zones;
+            if hits_activity_button(zones.explorer, zones.activity_row, mouse.column, mouse.row)
+                || hits_activity_button(zones.search, zones.activity_row, mouse.column, mouse.row)
+                || hits_activity_button(
+                    zones.source_control,
+                    zones.activity_row,
+                    mouse.column,
+                    mouse.row,
+                )
+                || hits_activity_button(zones.excludes, zones.activity_row, mouse.column, mouse.row)
+            {
+                return self.left_click(mouse);
+            }
+        }
         if self.overlay.is_some() {
             self.overlay_mouse(mouse);
             return None;

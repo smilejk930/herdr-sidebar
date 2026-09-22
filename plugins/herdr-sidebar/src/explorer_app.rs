@@ -1223,30 +1223,33 @@ impl App {
         // hover title-bar buttons until the linger expires.
         self.last_mouse = Some(std::time::Instant::now());
         self.mouse_pos = Some((mouse.column, mouse.row));
+        // Activities are global navigation, including while an Exclude modal
+        // is open. Handle them before modal hit-testing so a click has the
+        // same 1/2/3/4 behaviour as its keyboard counterpart.
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.merged() {
+            let zones = self.activity;
+            if hits_activity_button(zones.explorer, zones.row, mouse.column, mouse.row) {
+                self.overlay = None;
+                self.sidebar_state = sidebar::update_state(|state| state.search_active = false);
+                return None;
+            }
+            if hits_activity_button(zones.search, zones.row, mouse.column, mouse.row) {
+                self.open_content_search(false);
+                return None;
+            }
+            if hits_activity_button(zones.source_control, zones.row, mouse.column, mouse.row) {
+                return self.switch_to(View::SourceControl);
+            }
+            if hits_activity_button(zones.excludes, zones.row, mouse.column, mouse.row) {
+                self.open_excludes();
+                return None;
+            }
+        }
         if self.overlay.is_some() && !matches!(self.overlay, Some(Overlay::ContentSearch { .. })) {
             self.overlay_mouse(mouse);
             return None;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            let zones = self.activity;
-            if self.merged() {
-                if hits_activity_button(zones.explorer, zones.row, mouse.column, mouse.row) {
-                    self.overlay = None;
-                    self.sidebar_state = sidebar::update_state(|state| state.search_active = false);
-                    return None;
-                }
-                if hits_activity_button(zones.search, zones.row, mouse.column, mouse.row) {
-                    self.open_content_search(false);
-                    return None;
-                }
-                if hits_activity_button(zones.source_control, zones.row, mouse.column, mouse.row) {
-                    return self.switch_to(View::SourceControl);
-                }
-                if hits_activity_button(zones.excludes, zones.row, mouse.column, mouse.row) {
-                    self.open_excludes();
-                    return None;
-                }
-            }
             let gear = self.gear;
             if hits(gear, mouse.column, mouse.row) {
                 self.open_settings();

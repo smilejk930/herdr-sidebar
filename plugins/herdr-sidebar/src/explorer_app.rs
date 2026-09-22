@@ -1452,6 +1452,7 @@ impl App {
         enum Cmd {
             Nothing,
             Close,
+            CloseExcludePrompt(ExcludeScope),
             Activate,
             ConfirmPrompt,
             OpenQuick(PathBuf),
@@ -1535,8 +1536,14 @@ impl App {
                 KeyCode::Enter => Cmd::Activate,
                 _ => Cmd::Nothing,
             },
-            Some(Overlay::Prompt { input, .. }) => match key.code {
-                KeyCode::Esc => Cmd::Close,
+            Some(Overlay::Prompt { input, kind, .. }) => match key.code {
+                // An exclude prompt is an inline editor for the Exclude
+                // activity, rather than a generic modal.  Preserve its scope
+                // when cancelling so Esc returns to the 4th activity list.
+                KeyCode::Esc => match kind {
+                    PromptKind::ExcludePattern { scope, .. } => Cmd::CloseExcludePrompt(*scope),
+                    _ => Cmd::Close,
+                },
                 KeyCode::Backspace => {
                     input.pop();
                     Cmd::Nothing
@@ -1823,6 +1830,7 @@ impl App {
                     self.sidebar_state = sidebar::update_state(|state| state.search_active = false);
                 }
             }
+            Cmd::CloseExcludePrompt(scope) => self.open_excludes_at(scope),
             Cmd::Activate => self.activate_menu_entry(),
             Cmd::ExcludeActivate => self.activate_exclude_row(),
             Cmd::ExcludeDelete => self.delete_exclude_row(),
@@ -2096,10 +2104,16 @@ impl App {
     }
 
     pub fn open_excludes(&mut self) {
+        self.open_excludes_at(ExcludeScope::Project);
+    }
+
+    /// Opens the Exclude activity while retaining the caller's configuration
+    /// scope. Pattern cancel/save/error all use this path.
+    fn open_excludes_at(&mut self, scope: ExcludeScope) {
         self.suspend_search_for_modal();
         self.overlay = Some(Overlay::Excludes {
             selected: 0,
-            scope: ExcludeScope::Project,
+            scope,
             rect: Rect::default(),
             scroll: 0,
         });
@@ -2979,7 +2993,11 @@ impl App {
             self.overlay.as_ref().and_then(|overlay| match overlay {
                 Overlay::Excludes {
                     selected, scope, ..
-                } => Some((*selected, *scope)),
+                } => Some((Some(*selected), *scope)),
+                Overlay::Prompt {
+                    kind: PromptKind::ExcludePattern { scope, .. },
+                    ..
+                } => Some((None, *scope)),
                 _ => None,
             })
         else {
@@ -2987,7 +3005,9 @@ impl App {
         };
         let rows = self.exclude_rows(scope);
         let height = usize::from(area.height.max(1));
-        let scroll = keep_visible_scroll(selected_index, height, rows.len());
+        let scroll = selected_index
+            .map(|selected| keep_visible_scroll(selected, height, rows.len()))
+            .unwrap_or(0);
         if let Some(Overlay::Excludes {
             rect,
             scroll: stored_scroll,
@@ -3003,7 +3023,7 @@ impl App {
             .skip(scroll)
             .take(height)
             .map(|(index, (_, label))| {
-                let style = if index == selected_index {
+                let style = if selected_index == Some(index) {
                     selection_style(true)
                 } else if label.ends_with("preset") {
                     Style::default().bold()
@@ -3294,7 +3314,7 @@ impl App {
             let pattern = input.trim();
             if pattern.is_empty() || Glob::new(pattern).is_err() {
                 self.notice = Some("invalid exclude glob".into());
-                self.open_excludes();
+                self.open_excludes_at(scope);
                 return;
             }
             self.apply_excludes(excludes::update(&self.tree.root_path(), scope, |rules| {
@@ -3310,7 +3330,7 @@ impl App {
                     _ => {}
                 }
             }));
-            self.open_excludes();
+            self.open_excludes_at(scope);
             return;
         }
         let Some(name) = actions::validate_name(&input) else {
@@ -3569,13 +3589,18 @@ impl App {
         }
         self.draw_header(frame, header);
 
-        if matches!(self.overlay, Some(Overlay::Excludes { .. })) {
+        if self.excludes_activity_active() {
             self.draw_excludes(frame, body);
             self.body = BodyGeom::default();
-            frame.render_widget(
-                Paragraph::new(" ↑↓ select · enter edit · d delete · tab scope · esc close".dim()),
-                footer,
-            );
+            let footer_line = match &self.overlay {
+                Some(Overlay::Prompt {
+                    title,
+                    input,
+                    kind: PromptKind::ExcludePattern { .. },
+                }) => format!(" {title}: {input}█"),
+                _ => " ↑↓ select · enter edit · d delete · tab scope · esc close".into(),
+            };
+            frame.render_widget(Paragraph::new(footer_line), footer);
             return;
         }
 
@@ -3748,7 +3773,7 @@ impl App {
         });
         let gear_w = gear.as_ref().map(Span::width).unwrap_or(0) as u16;
         self.title_zones.clear();
-        let excludes_active = matches!(self.overlay, Some(Overlay::Excludes { .. }));
+        let excludes_active = self.excludes_activity_active();
         let (action_spans, actions_w) =
             if !excludes_active && title_actions_visible(self.last_mouse) {
                 let actions = [
@@ -3796,6 +3821,20 @@ impl App {
     fn set_theme(&mut self, theme: IconTheme) {
         self.theme = theme;
         self.sidebar_state = sidebar::update_state(|state| state.icons = Some(theme));
+    }
+
+    /// The pattern editor is still part of activity 4 even though it swaps
+    /// the list overlay for a text prompt. Keeping this identity avoids an
+    /// apparent jump back to Explorer while the user types a pattern.
+    fn excludes_activity_active(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(Overlay::Excludes { .. })
+                | Some(Overlay::Prompt {
+                    kind: PromptKind::ExcludePattern { .. },
+                    ..
+                })
+        )
     }
 
     /// The persisted "show hotkeys in the footer" setting.
@@ -3887,7 +3926,7 @@ impl App {
         let area = Rect::new(area.x, area.y + 1, area.width, 1);
         let (exp_icon, search_icon, git_icon, exclude_icon) = activity_icons(self.theme);
         let search_active = matches!(self.overlay, Some(Overlay::ContentSearch { .. }));
-        let excludes_active = matches!(self.overlay, Some(Overlay::Excludes { .. }));
+        let excludes_active = self.excludes_activity_active();
         // Both FA glyphs (folder, code-fork) render two cells wide in the
         // non-Mono Nerd Font; reserve the second cell in each chip so the
         // highlights are equal-sized with centered icons.
@@ -5227,6 +5266,40 @@ mod tests {
             search: Vec::new(),
             use_ignore_files: true,
         }
+    }
+
+    #[test]
+    fn escape_from_exclude_pattern_returns_to_the_same_exclude_scope() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-exclude-escape-{}-{}",
+            std::process::id(),
+            sidebar::unix_now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let follower = std::rc::Rc::new(std::cell::RefCell::new(
+            herdr_sidebar::launch::CwdFollower::default(),
+        ));
+        let mut app = App::new(root.clone(), follower);
+        app.overlay = Some(Overlay::Prompt {
+            title: "Search exclude pattern".into(),
+            input: "**/*.class".into(),
+            kind: PromptKind::ExcludePattern {
+                scope: ExcludeScope::Global,
+                category: ExcludeCategory::Search,
+                index: None,
+            },
+        });
+
+        app.overlay_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::Excludes {
+                scope: ExcludeScope::Global,
+                ..
+            })
+        ));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

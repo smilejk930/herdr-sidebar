@@ -413,6 +413,10 @@ pub struct App {
     /// Where the most recent preview landed, with its document key — so a
     /// double click pins that exact tab instead of re-opening it.
     last_preview: Option<(String, herdr_sidebar::viewer::PreviewTarget)>,
+    /// File shown by the latest preview. The Explorer header action uses
+    /// this only on demand to reveal the file without changing the tree when
+    /// a preview first opens.
+    last_preview_path: Option<PathBuf>,
     /// Last heartbeat stamp, throttling the token refresh.
     last_beat: std::time::Instant,
     /// A native folder picker running on a background thread; its result
@@ -556,6 +560,7 @@ impl App {
             mouse_pos: None,
             last_click: None,
             last_preview: None,
+            last_preview_path: None,
             last_beat: std::time::Instant::now(),
             picking: None,
             cwd_follower,
@@ -927,7 +932,14 @@ impl App {
         ) {
             // Remember where it landed: a double click pins THIS tab rather
             // than re-opening, which would race the viewer's first stamp.
-            Ok(target) => self.last_preview = Some((doc_key, target)),
+            Ok(target) => {
+                self.last_preview = Some((doc_key, target));
+                self.last_preview_path = Some(if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    self.tree.root_path().join(path)
+                });
+            }
             Err(e) => self.notice = Some(e),
         }
     }
@@ -1381,6 +1393,7 @@ impl App {
             TitleAction::NewFile => self.open_create_prompt(false),
             TitleAction::NewFolder => self.open_create_prompt(true),
             TitleAction::Refresh => self.refresh_tree(),
+            TitleAction::RevealPreview => self.reveal_last_preview_in_tree(),
             TitleAction::CollapseAll => {
                 self.tree.collapse_all();
                 self.scroll = 0;
@@ -3438,6 +3451,34 @@ impl App {
         self.rebuild();
     }
 
+    /// Reveal the current preview only when the user explicitly clicks the
+    /// Explorer header action. Opening a preview must never expand the tree
+    /// by itself, and a preview outside this workspace has no matching row.
+    fn reveal_last_preview_in_tree(&mut self) {
+        let Some(path) = self.last_preview_path.clone() else {
+            return;
+        };
+        let root = self.tree.root_path();
+        if !path.starts_with(&root) {
+            self.notice = Some("preview is outside the Explorer folder".into());
+            return;
+        }
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if dir == root {
+                break;
+            }
+            self.tree.expand(dir);
+            parent = dir.parent();
+        }
+        self.rebuild();
+        if let Some(index) = self.rows.iter().position(|row| row.path == path) {
+            self.select(index);
+        } else {
+            self.notice = Some("preview file is hidden or no longer exists".into());
+        }
+    }
+
     /// The visible row index at a pane-local mouse row, if it lands on one.
     fn row_at(&self, mouse_row: u16) -> Option<usize> {
         row_index_at(self.body, self.rows.len(), mouse_row)
@@ -3821,12 +3862,15 @@ impl App {
         let excludes_active = self.excludes_activity_active();
         let (action_spans, actions_w) =
             if !excludes_active && title_actions_visible(self.last_mouse) {
-                let actions = [
+                let mut actions = vec![
                     TitleAction::NewFile,
                     TitleAction::NewFolder,
                     TitleAction::Refresh,
-                    TitleAction::CollapseAll,
                 ];
+                if self.last_preview_path.is_some() {
+                    actions.push(TitleAction::RevealPreview);
+                }
+                actions.push(TitleAction::CollapseAll);
                 let w = title_actions_width(self.theme, &actions);
                 let ax = area.x + area.width.saturating_sub(gear_w + w);
                 let (spans, zones) =
@@ -5448,6 +5492,32 @@ mod tests {
                         && label.starts_with("Inherited Global:")
                 })
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preview_reveal_title_action_expands_the_last_preview_only_on_demand() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-reveal-preview-{}-{}",
+            std::process::id(),
+            sidebar::unix_now()
+        ));
+        let nested = root.join("src").join("feature");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("example.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let follower = std::rc::Rc::new(std::cell::RefCell::new(
+            herdr_sidebar::launch::CwdFollower::default(),
+        ));
+        let mut app = App::new(root.clone(), follower);
+        app.last_preview_path = Some(file.clone());
+
+        assert!(!app.tree.is_expanded(&root.join("src")));
+        app.title_action(TitleAction::RevealPreview);
+
+        assert!(app.tree.is_expanded(&root.join("src")));
+        assert!(app.tree.is_expanded(&nested));
+        assert_eq!(app.selected_row().map(|row| &row.path), Some(&file));
         let _ = std::fs::remove_dir_all(root);
     }
 

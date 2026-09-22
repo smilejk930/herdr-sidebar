@@ -76,8 +76,9 @@ Use the mouse or press `1`, `2`, `3`, and `4`.
 - Manage VS Code-style glob patterns directly from activity `4`.
 - `Files exclude` only hides entries in Explorer; `Search exclude` applies to Quick Open and
   project text search. Toggle **Search use Git ignore** to include Git-ignored source files.
-- Rules can be global or scoped to the current project. The **Web application preset** is an
-  editable example for `.next`, `build`, `node_modules`, `.git`, and Java class artifacts.
+- Rules can be global or scoped to the current project. The **Web application preset** keeps
+  Explorer files visible and excludes `.next`, `build`, `node_modules`, `.git`, and Java class
+  artifacts from search.
 
 ## Settings
 

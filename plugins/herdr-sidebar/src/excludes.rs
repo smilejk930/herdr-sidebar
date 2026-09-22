@@ -137,13 +137,46 @@ pub fn update(root: &Path, scope: Scope, update: impl FnOnce(&mut Rules)) -> Eff
 
 /// Install the built-in example for a typical web application workspace.
 pub fn apply_web_application_preset(root: &Path) -> EffectiveRules {
-    update(root, Scope::Project, |rules| {
-        rules.files = vec![
-            "**/.next".into(),
-            "**/build".into(),
-            "**/node_modules".into(),
-        ];
-        rules.search = vec!["**/.git".into(), "**/.next".into(), "**/*.class".into()];
-        rules.use_ignore_files = Some(false);
-    })
+    update(root, Scope::Project, apply_web_application_rules)
+}
+
+fn apply_web_application_rules(rules: &mut Rules) {
+    rules.files.clear();
+    rules.search = vec![
+        "**/.git".into(),
+        "**/.next".into(),
+        "**/build".into(),
+        "**/node_modules".into(),
+        "**/*.class".into(),
+    ];
+    rules.use_ignore_files = Some(false);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_application_preset_clears_file_excludes_and_sets_search_excludes() {
+        let mut rules = Rules {
+            files: vec!["**/dist".into()],
+            search: vec!["**/generated".into()],
+            use_ignore_files: Some(true),
+        };
+
+        apply_web_application_rules(&mut rules);
+
+        assert!(rules.files.is_empty());
+        assert_eq!(
+            rules.search,
+            [
+                "**/.git",
+                "**/.next",
+                "**/build",
+                "**/node_modules",
+                "**/*.class"
+            ]
+        );
+        assert_eq!(rules.use_ignore_files, Some(false));
+    }
 }

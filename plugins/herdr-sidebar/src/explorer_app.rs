@@ -4145,9 +4145,13 @@ impl App {
             .take(usize::from(list_area.height))
             .filter_map(|(match_index, file_index)| {
                 let file = files.get(*file_index)?;
-                let label =
-                    truncate_path_tail(&file.label, usize::from(list_area.width).saturating_sub(1));
-                let line = Line::raw(format!(" {label}"));
+                let (name, parent) =
+                    quick_open_display(&file.label, usize::from(list_area.width).saturating_sub(1));
+                let mut spans = vec![Span::raw(" "), Span::raw(name)];
+                if let Some(parent) = parent {
+                    spans.push(Span::styled(format!("  {parent}"), Style::default().dim()));
+                }
+                let line = Line::from(spans);
                 Some(if match_index == *selected {
                     ListItem::new(line).style(selection_style(true))
                 } else {
@@ -5064,6 +5068,46 @@ fn truncate_path_tail(label: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
+/// Render Quick Open results in the same information order as VS Code:
+/// filename first, with its relative parent as a secondary description.
+///
+/// A terminal sidebar is often much narrower than VS Code's picker.  When
+/// space is scarce, preserving the filename makes duplicate controller files
+/// distinguishable and avoids the misleading leading `…controller/` output
+/// produced by truncating a complete path from the left.
+fn quick_open_display(label: &str, max: usize) -> (String, Option<String>) {
+    let (parent, name) = label.rsplit_once('/').unwrap_or(("", label));
+    let name = truncate_to(name.to_string(), max);
+    if parent.is_empty() || name.is_empty() {
+        return (name, None);
+    }
+
+    let remaining = max.saturating_sub(Span::raw(name.as_str()).width() + 2);
+    if remaining < 3 {
+        return (name, None);
+    }
+    let parent = if Span::raw(parent).width() <= remaining {
+        parent.to_string()
+    } else {
+        let last_component = parent.rsplit('/').next().unwrap_or(parent);
+        let prefix = "…/";
+        let suffix_width = remaining.saturating_sub(Span::raw(prefix).width());
+        if suffix_width == 0 {
+            "…".to_string()
+        } else {
+            format!(
+                "{prefix}{}",
+                truncate_to(last_component.to_string(), suffix_width)
+            )
+        }
+    };
+    if parent.is_empty() {
+        (name, None)
+    } else {
+        (name, Some(parent))
+    }
+}
+
 fn pane_focused_in(pane_list_json: &str, pane_id: &str) -> bool {
     let Ok(value) =
         serde_json::from_str::<serde_json::Value>(pane_list_json.trim_start_matches('\u{feff}'))
@@ -5685,6 +5729,34 @@ mod tests {
         assert_eq!(truncate_path_tail("main.rs", 12), "main.rs");
         assert_eq!(truncate_path_tail("main.rs", 0), "");
         assert_eq!(truncate_path_tail("src/界面.rs", 8), "…界面.rs");
+    }
+
+    #[test]
+    fn quick_open_displays_filename_before_its_parent_path() {
+        assert_eq!(
+            quick_open_display(
+                "gr-be/src/main/java/controller/SampleBbsController.java",
+                80
+            ),
+            (
+                "SampleBbsController.java".into(),
+                Some("gr-be/src/main/java/controller".into())
+            )
+        );
+        assert_eq!(
+            quick_open_display(
+                "gr-be/src/main/java/controller/SampleBbsController.java",
+                40
+            ),
+            (
+                "SampleBbsController.java".into(),
+                Some("…/controller".into())
+            )
+        );
+        assert_eq!(
+            quick_open_display("SampleBbsController.java", 35),
+            ("SampleBbsController.java".into(), None)
+        );
     }
 
     #[test]

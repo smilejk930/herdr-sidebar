@@ -4978,9 +4978,23 @@ fn quick_matches(files: &[QuickFile], query: &str) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, file)| {
-            fuzzy_score_lowercased(&query_lower, &file.label_lower).map(|score| (index, score))
+            fuzzy_score_lowercased(&query_lower, quick_file_name(&file.label_lower))
+                .map(|score| (index, score))
         })
         .collect::<Vec<_>>();
+    // File names are the primary Quick Open target. Searching the full path
+    // first lets unrelated directory names drown out exact file-name matches.
+    // Retain the path fallback for queries such as "src/main" that cannot
+    // possibly match a base name.
+    if ranked.is_empty() {
+        ranked = files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, file)| {
+                fuzzy_score_lowercased(&query_lower, &file.label_lower).map(|score| (index, score))
+            })
+            .collect();
+    }
     ranked.sort_by(|(left_index, left_score), (right_index, right_score)| {
         right_score
             .cmp(left_score)
@@ -4993,6 +5007,10 @@ fn quick_matches(files: &[QuickFile], query: &str) -> Vec<usize> {
             .then_with(|| files[*left_index].label.cmp(&files[*right_index].label))
     });
     ranked.into_iter().map(|(index, _)| index).collect()
+}
+
+fn quick_file_name(label: &str) -> &str {
+    label.rsplit(['/', '\\']).next().unwrap_or(label)
 }
 
 fn fuzzy_score_lowercased(query: &str, candidate: &str) -> Option<i64> {
@@ -5634,6 +5652,29 @@ mod tests {
         assert!(fuzzy_score_lowercased("smr", "src/main.rs").is_some());
         assert!(fuzzy_score_lowercased("smr", "readme.md").is_none());
         assert_eq!(quick_matches(&files, "read"), vec![1]);
+    }
+
+    #[test]
+    fn quick_open_prefers_file_name_matches_over_directory_matches() {
+        let files = vec![
+            QuickFile {
+                path: PathBuf::from("src/SampleBbs.java"),
+                label: "src/SampleBbs.java".into(),
+                label_lower: "src/samplebbs.java".into(),
+            },
+            QuickFile {
+                path: PathBuf::from("src/SampleBbsController.java"),
+                label: "src/SampleBbsController.java".into(),
+                label_lower: "src/samplebbscontroller.java".into(),
+            },
+            QuickFile {
+                path: PathBuf::from("sample/bbs/controller/PlatBbsController.java"),
+                label: "sample/bbs/controller/PlatBbsController.java".into(),
+                label_lower: "sample/bbs/controller/platbbscontroller.java".into(),
+            },
+        ];
+
+        assert_eq!(quick_matches(&files, "samplebbs"), vec![0, 1]);
     }
 
     #[test]

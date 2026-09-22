@@ -5073,8 +5073,8 @@ fn truncate_path_tail(label: &str, max: usize) -> String {
 ///
 /// A terminal sidebar is often much narrower than VS Code's picker.  When
 /// space is scarce, preserving the filename makes duplicate controller files
-/// distinguishable and avoids the misleading leading `…controller/` output
-/// produced by truncating a complete path from the left.
+/// distinguishable. The parent path is then truncated on the right, matching
+/// VS Code's `filename  relative/parent…` presentation.
 fn quick_open_display(label: &str, max: usize) -> (String, Option<String>) {
     let (parent, name) = label.rsplit_once('/').unwrap_or(("", label));
     let name = truncate_to(name.to_string(), max);
@@ -5086,21 +5086,7 @@ fn quick_open_display(label: &str, max: usize) -> (String, Option<String>) {
     if remaining < 3 {
         return (name, None);
     }
-    let parent = if Span::raw(parent).width() <= remaining {
-        parent.to_string()
-    } else {
-        let last_component = parent.rsplit('/').next().unwrap_or(parent);
-        let prefix = "…/";
-        let suffix_width = remaining.saturating_sub(Span::raw(prefix).width());
-        if suffix_width == 0 {
-            "…".to_string()
-        } else {
-            format!(
-                "{prefix}{}",
-                truncate_to(last_component.to_string(), suffix_width)
-            )
-        }
-    };
+    let parent = truncate_to(parent.to_string(), remaining);
     if parent.is_empty() {
         (name, None)
     } else {
@@ -5750,7 +5736,7 @@ mod tests {
             ),
             (
                 "SampleBbsController.java".into(),
-                Some("…/controller".into())
+                Some("gr-be/src/mai…".into())
             )
         );
         assert_eq!(

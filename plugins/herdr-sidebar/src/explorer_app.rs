@@ -350,6 +350,7 @@ type SettingRow = (Setting, &'static str, String, bool);
 #[derive(Clone, Copy)]
 enum ExcludeRow {
     Scope,
+    GlobalSummary,
     GitIgnore,
     Add(ExcludeCategory),
     Pattern(ExcludeCategory, usize),
@@ -390,6 +391,9 @@ pub struct App {
     // Merged-sidebar state.
     sidebar_state: sidebar::State,
     exclude_rules: EffectiveRules,
+    /// Scope last selected in activity 4. Reopening the activity must not
+    /// silently switch a user back from Global to Project.
+    exclude_scope: ExcludeScope,
     other_exe: Option<std::path::PathBuf>,
     activity: ActivityZones,
     /// The ⚙ button's rect from the last draw (activity bar in unified mode,
@@ -543,6 +547,7 @@ impl App {
             notice: None,
             sidebar_state,
             exclude_rules,
+            exclude_scope: ExcludeScope::Project,
             other_exe,
             activity: ActivityZones::default(),
             gear: Rect::default(),
@@ -1473,6 +1478,7 @@ impl App {
             ToggleSetting(usize),
             ExcludeActivate,
             ExcludeDelete,
+            ToggleExcludeScope,
             AdjustWidth(bool),
             DeleteConfirmed(PathBuf, bool),
             Picker(PickerAction),
@@ -1512,7 +1518,7 @@ impl App {
                 _ => Cmd::Nothing,
             },
             Some(Overlay::Excludes {
-                selected, scope, ..
+                selected, scope: _, ..
             }) => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('4') => Cmd::Close,
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -1523,11 +1529,7 @@ impl App {
                     *selected = (*selected + 1).min(exclude_row_count.saturating_sub(1));
                     Cmd::Nothing
                 }
-                KeyCode::Tab => {
-                    *scope = scope.other();
-                    *selected = 0;
-                    Cmd::Nothing
-                }
+                KeyCode::Tab => Cmd::ToggleExcludeScope,
                 KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('a') => Cmd::ExcludeActivate,
                 KeyCode::Char('d') | KeyCode::Delete => Cmd::ExcludeDelete,
                 _ => Cmd::Nothing,
@@ -1846,6 +1848,7 @@ impl App {
             Cmd::Activate => self.activate_menu_entry(),
             Cmd::ExcludeActivate => self.activate_exclude_row(),
             Cmd::ExcludeDelete => self.delete_exclude_row(),
+            Cmd::ToggleExcludeScope => self.toggle_exclude_scope(),
             Cmd::ConfirmPrompt => self.confirm_prompt(),
             Cmd::OpenQuick(path) => {
                 self.overlay = None;
@@ -2116,13 +2119,14 @@ impl App {
     }
 
     pub fn open_excludes(&mut self) {
-        self.open_excludes_at(ExcludeScope::Project);
+        self.open_excludes_at(self.exclude_scope);
     }
 
     /// Opens the Exclude activity while retaining the caller's configuration
     /// scope. Pattern cancel/save/error all use this path.
     fn open_excludes_at(&mut self, scope: ExcludeScope) {
         self.suspend_search_for_modal();
+        self.exclude_scope = scope;
         self.overlay = Some(Overlay::Excludes {
             selected: 0,
             scope,
@@ -2133,11 +2137,29 @@ impl App {
 
     fn exclude_rows(&self, scope: ExcludeScope) -> Vec<(ExcludeRow, String)> {
         let rules = excludes::scoped(&self.tree.root_path(), scope);
-        let mut rows = vec![
-            (
-                ExcludeRow::Scope,
-                format!("Scope: {} (tab to switch)", scope.label()),
-            ),
+        let mut rows = vec![(
+            ExcludeRow::Scope,
+            match scope {
+                ExcludeScope::Global => {
+                    "Scope: Global — applies to all projects (tab to switch)".into()
+                }
+                ExcludeScope::Project => {
+                    "Scope: Project — Global + this project (tab to switch)".into()
+                }
+            },
+        )];
+        if scope == ExcludeScope::Project {
+            let global = excludes::scoped(&self.tree.root_path(), ExcludeScope::Global);
+            rows.push((
+                ExcludeRow::GlobalSummary,
+                format!(
+                    "Inherited Global: {} file / {} search pattern(s) — switch Scope to edit",
+                    global.files.len(),
+                    global.search.len()
+                ),
+            ));
+        }
+        rows.extend([
             (
                 ExcludeRow::GitIgnore,
                 format!(
@@ -2156,7 +2178,7 @@ impl App {
                 ExcludeRow::Add(ExcludeCategory::Files),
                 "Files exclude  + Add pattern".into(),
             ),
-        ];
+        ]);
         rows.extend(rules.files.iter().enumerate().map(|(index, pattern)| {
             (
                 ExcludeRow::Pattern(ExcludeCategory::Files, index),
@@ -2197,15 +2219,8 @@ impl App {
             return;
         };
         match row {
-            ExcludeRow::Scope => {
-                if let Some(Overlay::Excludes {
-                    scope, selected, ..
-                }) = self.overlay.as_mut()
-                {
-                    *scope = scope.other();
-                    *selected = 0;
-                }
-            }
+            ExcludeRow::Scope => self.toggle_exclude_scope(),
+            ExcludeRow::GlobalSummary => {}
             ExcludeRow::GitIgnore => {
                 let current = excludes::scoped(&self.tree.root_path(), scope)
                     .use_ignore_files
@@ -2247,6 +2262,18 @@ impl App {
                 &self.tree.root_path(),
             )),
         }
+    }
+
+    fn toggle_exclude_scope(&mut self) {
+        let Some(Overlay::Excludes {
+            scope, selected, ..
+        }) = self.overlay.as_mut()
+        else {
+            return;
+        };
+        *scope = scope.other();
+        *selected = 0;
+        self.exclude_scope = *scope;
     }
 
     fn delete_exclude_row(&mut self) {
@@ -5368,6 +5395,58 @@ mod tests {
                 ..
             })
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reopening_excludes_keeps_the_last_selected_scope() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-exclude-scope-{}-{}",
+            std::process::id(),
+            sidebar::unix_now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let follower = std::rc::Rc::new(std::cell::RefCell::new(
+            herdr_sidebar::launch::CwdFollower::default(),
+        ));
+        let mut app = App::new(root.clone(), follower);
+
+        app.open_excludes();
+        app.overlay_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.overlay_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.open_excludes();
+
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::Excludes {
+                scope: ExcludeScope::Global,
+                ..
+            })
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_excludes_identify_the_inherited_global_rules() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-sidebar-exclude-summary-{}-{}",
+            std::process::id(),
+            sidebar::unix_now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let follower = std::rc::Rc::new(std::cell::RefCell::new(
+            herdr_sidebar::launch::CwdFollower::default(),
+        ));
+        let app = App::new(root.clone(), follower);
+
+        assert!(
+            app.exclude_rows(ExcludeScope::Project)
+                .iter()
+                .any(|(row, label)| {
+                    matches!(row, ExcludeRow::GlobalSummary)
+                        && label.starts_with("Inherited Global:")
+                })
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -1853,11 +1853,20 @@ impl App {
             Nothing,
             Close,
             Activate,
+            ActivateExclude,
             ToggleSetting(usize),
             Reopen(u16, u16),
             Picker(PickerAction),
         }
         let row_count = self.settings_rows().len();
+        let exclude_row_count = self
+            .overlay
+            .as_ref()
+            .and_then(|overlay| match overlay {
+                Overlay::Excludes { scope, .. } => Some(self.exclude_rows(*scope).len()),
+                _ => None,
+            })
+            .unwrap_or(0);
         let cmd = match self.overlay.as_mut() {
             Some(Overlay::Settings {
                 selected,
@@ -1894,6 +1903,40 @@ impl App {
                                 && mouse.row < rect.y + rect.height =>
                             {
                                 Cmd::Nothing
+                            }
+                            None => Cmd::Close,
+                        }
+                    }
+                    _ => Cmd::Nothing,
+                }
+            }
+            Some(Overlay::Excludes {
+                selected,
+                rect,
+                scroll,
+                ..
+            }) => {
+                let row_at = |row: u16, col: u16| -> Option<usize> {
+                    let index = usize::from(row.saturating_sub(rect.y)) + *scroll;
+                    (col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
+                        && index < exclude_row_count)
+                        .then_some(index)
+                };
+                match mouse.kind {
+                    MouseEventKind::Moved => {
+                        if let Some(index) = row_at(mouse.row, mouse.column) {
+                            *selected = index;
+                        }
+                        Cmd::Nothing
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        match row_at(mouse.row, mouse.column) {
+                            Some(index) => {
+                                *selected = index;
+                                Cmd::ActivateExclude
                             }
                             None => Cmd::Close,
                         }
@@ -1947,6 +1990,7 @@ impl App {
             Cmd::Nothing => {}
             Cmd::Close => self.overlay = None,
             Cmd::Activate => self.activate_menu_entry(),
+            Cmd::ActivateExclude => self.activate_exclude_row(),
             Cmd::ToggleSetting(index) => self.toggle_setting(index),
             Cmd::Reopen(x, y) => {
                 self.overlay = None;
@@ -3704,25 +3748,32 @@ impl App {
         });
         let gear_w = gear.as_ref().map(Span::width).unwrap_or(0) as u16;
         self.title_zones.clear();
-        let (action_spans, actions_w) = if title_actions_visible(self.last_mouse) {
-            let actions = [
-                TitleAction::NewFile,
-                TitleAction::NewFolder,
-                TitleAction::Refresh,
-                TitleAction::CollapseAll,
-            ];
-            let w = title_actions_width(self.theme, &actions);
-            let ax = area.x + area.width.saturating_sub(gear_w + w);
-            let (spans, zones) =
-                title_action_spans(self.theme, &actions, ax, area.y, self.mouse_pos);
-            self.title_zones = zones;
-            (spans, w)
-        } else {
-            (Vec::new(), 0)
-        };
+        let excludes_active = matches!(self.overlay, Some(Overlay::Excludes { .. }));
+        let (action_spans, actions_w) =
+            if !excludes_active && title_actions_visible(self.last_mouse) {
+                let actions = [
+                    TitleAction::NewFile,
+                    TitleAction::NewFolder,
+                    TitleAction::Refresh,
+                    TitleAction::CollapseAll,
+                ];
+                let w = title_actions_width(self.theme, &actions);
+                let ax = area.x + area.width.saturating_sub(gear_w + w);
+                let (spans, zones) =
+                    title_action_spans(self.theme, &actions, ax, area.y, self.mouse_pos);
+                self.title_zones = zones;
+                (spans, w)
+            } else {
+                (Vec::new(), 0)
+            };
         // The name yields to the buttons and gear in narrow panes.
         let avail = usize::from(area.width.saturating_sub(gear_w + actions_w));
-        let root_label = truncate_to(format!(" {}", self.tree.root_name().to_uppercase()), avail);
+        let header_label = if excludes_active {
+            " EXCLUDE".to_string()
+        } else {
+            format!(" {}", self.tree.root_name().to_uppercase())
+        };
+        let root_label = truncate_to(header_label, avail);
         let name = Span::styled(
             root_label,
             Style::default().bold().fg(palette().header_accent),
@@ -3836,6 +3887,7 @@ impl App {
         let area = Rect::new(area.x, area.y + 1, area.width, 1);
         let (exp_icon, search_icon, git_icon, exclude_icon) = activity_icons(self.theme);
         let search_active = matches!(self.overlay, Some(Overlay::ContentSearch { .. }));
+        let excludes_active = matches!(self.overlay, Some(Overlay::Excludes { .. }));
         // Both FA glyphs (folder, code-fork) render two cells wide in the
         // non-Mono Nerd Font; reserve the second cell in each chip so the
         // highlights are equal-sized with centered icons.
@@ -3877,14 +3929,12 @@ impl App {
         let search_hovered = hovered(bounds[3]);
         let git_hovered = hovered(bounds[5]);
         let excludes_hovered = hovered(bounds[7]);
-        spans[1].style = activity_button_style(!search_active, explorer_hovered);
+        spans[1].style =
+            activity_button_style(!search_active && !excludes_active, explorer_hovered);
         spans[3].style = activity_button_style(search_active, search_hovered);
         spans[5].style = activity_button_style(false, git_hovered);
-        spans[7].style = activity_button_style(
-            matches!(self.overlay, Some(Overlay::Excludes { .. })),
-            excludes_hovered,
-        );
-        let (chip_start, chip_end) = if matches!(self.overlay, Some(Overlay::Excludes { .. })) {
+        spans[7].style = activity_button_style(excludes_active, excludes_hovered);
+        let (chip_start, chip_end) = if excludes_active {
             bounds[7]
         } else if search_active {
             bounds[3]
@@ -3899,14 +3949,14 @@ impl App {
             palette().selection_bg,
         );
         for (active, is_hovered, button_bounds) in [
-            (!search_active, explorer_hovered, bounds[1]),
+            (
+                !search_active && !excludes_active,
+                explorer_hovered,
+                bounds[1],
+            ),
             (search_active, search_hovered, bounds[3]),
             (false, git_hovered, bounds[5]),
-            (
-                matches!(self.overlay, Some(Overlay::Excludes { .. })),
-                excludes_hovered,
-                bounds[7],
-            ),
+            (excludes_active, excludes_hovered, bounds[7]),
         ] {
             if !active && is_hovered {
                 draw_activity_caps(

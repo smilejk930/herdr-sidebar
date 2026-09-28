@@ -399,6 +399,10 @@ pub fn plugin_state_dir() -> Option<PathBuf> {
     Some(base?.join("herdr").join("plugins").join("herdr-sidebar"))
 }
 
+pub(crate) fn state_dir() -> Option<PathBuf> {
+    plugin_state_dir()
+}
+
 /// Env for panes WE spawn. Panes don't inherit the hook/action env herdr
 /// injects, so forward the state dir and prepend the directory containing
 /// our executable to PATH. Launchers can then type the same bare command in

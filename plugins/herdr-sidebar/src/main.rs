@@ -361,6 +361,7 @@ fn resolve_root(
 
 /// The explorer's event loop: short poll so the liveness heartbeat keeps
 /// stamping even while idle.
+#[allow(clippy::too_many_arguments)]
 fn run_explorer(
     terminal: &mut ratatui::DefaultTerminal,
     cwd_follower: Rc<RefCell<launch::CwdFollower>>,
